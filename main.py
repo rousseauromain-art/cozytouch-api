@@ -1,6 +1,12 @@
 import os, json
 from fastapi import FastAPI, Header, HTTPException, Query
 from cozytouch_client import CozytouchClient
+import redis
+
+# Connexion à Redis
+REDIS_URL = os.getenv("REDIS_URL")
+# On décode les réponses pour avoir des strings plutôt que des bytes
+db = redis.from_url(REDIS_URL, decode_responses=True) if REDIS_URL else None
 
 API_KEY = os.getenv("API_KEY")
 CT_USER = os.getenv("CT_USER")
@@ -18,11 +24,13 @@ def _auth(auth: str | None):
         raise HTTPException(401, "Invalid API key")
 
 def _load():
-    if not os.path.exists(STORAGE_FILE): return {}
-    with open(STORAGE_FILE,"r",encoding="utf-8") as f: return json.load(f)
+    if not db: return {}
+    data = db.get("radiator_storage")
+    return json.loads(data) if data else {}
 
 def _save(d: dict):
-    with open(STORAGE_FILE,"w",encoding="utf-8") as f: json.dump(d,f,ensure_ascii=False,indent=2)
+    if db:
+        db.set("radiator_storage", json.dumps(d))
 
 @app.get("/radiators/discover")
 async def discover(authorization: str | None = Header(default=None)):
@@ -103,4 +111,5 @@ async def program_eco(authorization: str | None = Header(default=None)):
             results.append({"deviceURL": url, "ok": True})
         except Exception as e:
             results.append({"deviceURL": url, "ok": False, "error": str(e)})
+
     return {"ok": True, "count": len(results), "results": results}
