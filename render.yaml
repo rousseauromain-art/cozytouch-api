@@ -1,0 +1,16 @@
+
+services:
+  - type: web
+    name: cozytouch-api
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: CT_USER
+        sync: false
+      - key: CT_PASS
+        sync: false
+      - key: API_KEY
+        sync: false
