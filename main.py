@@ -1,21 +1,20 @@
-import os, json
+import os, json, redis
 from fastapi import FastAPI, Header, HTTPException, Query
 from cozytouch_client import CozytouchClient
-import redis
 
-# Connexion à Redis
-REDIS_URL = os.getenv("REDIS_URL")
-# On décode les réponses pour avoir des strings plutôt que des bytes
-db = redis.from_url(REDIS_URL, decode_responses=True) if REDIS_URL else None
-
+# Configuration des Secrets
 API_KEY = os.getenv("API_KEY")
 CT_USER = os.getenv("CT_USER")
 CT_PASS = os.getenv("CT_PASS")
-if not (API_KEY and CT_USER and CT_PASS):
-    raise SystemExit("Définir API_KEY, CT_USER, CT_PASS en Secrets Replit")
+REDIS_URL = os.getenv("REDIS_URL")
 
-STORAGE_FILE = "storage.json"
-app = FastAPI(title="Cozytouch Micro-API")
+if not (API_KEY and CT_USER and CT_PASS):
+    raise SystemExit("Erreur : Variables d'environnement manquantes sur Render")
+
+app = FastAPI(title="Cozytouch Micro-API Redis")
+
+# Connexion à la base de données Render Redis
+db = redis.from_url(REDIS_URL, decode_responses=True) if REDIS_URL else None
 
 def _auth(auth: str | None):
     if not auth or not auth.startswith("Bearer "):
@@ -113,3 +112,4 @@ async def program_eco(authorization: str | None = Header(default=None)):
             results.append({"deviceURL": url, "ok": False, "error": str(e)})
 
     return {"ok": True, "count": len(results), "results": results}
+
