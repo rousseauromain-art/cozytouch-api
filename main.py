@@ -130,3 +130,12 @@ async def restore_all(token: str = Depends(_verify_token)):
         except:
             results.append({"label": data["label"], "status": "Échec"})
     return {"ok": True, "results": results}
+
+@app.get("/test-auth", tags=["Debug"])
+async def test_auth(token: str = Depends(_verify_token)):
+    cli = CozytouchClient(CT_USER, CT_PASS)
+    try:
+        jwt = await cli.token()
+        return {"status": "Authentification réussie", "token_prefix": jwt[:15]}
+    except Exception as e:
+        return {"status": "Erreur d'identifiants", "detail": str(e)}
