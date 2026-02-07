@@ -1,39 +1,57 @@
 import os, json, redis
-from fastapi import FastAPI, Header, HTTPException, Query
+from fastapi import FastAPI, Header, HTTPException, Query, Depends
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from cozytouch_client import CozytouchClient
 
-# Configuration des Secrets
+# --- CONFIGURATION DES SECRETS ---
 API_KEY = os.getenv("API_KEY")
 CT_USER = os.getenv("CT_USER")
 CT_PASS = os.getenv("CT_PASS")
 REDIS_URL = os.getenv("REDIS_URL")
 
 if not (API_KEY and CT_USER and CT_PASS):
-    raise SystemExit("Erreur : Variables d'environnement manquantes sur Render")
+    raise SystemExit("Erreur : Les variables API_KEY, CT_USER ou CT_PASS sont manquantes.")
 
-app = FastAPI(title="Cozytouch Micro-API Redis")
+# --- INITIALISATION ---
+app = FastAPI(
+    title="Cozytouch Micro-API Redis",
+    description="Pilotez vos radiateurs Cozytouch depuis votre mobile"
+)
 
-# Connexion à la base de données Render Redis
+# Sécurité pour Swagger (le cadenas)
+security = HTTPBearer()
+
+# Connexion à Redis
 db = redis.from_url(REDIS_URL, decode_responses=True) if REDIS_URL else None
 
-def _auth(auth: str | None):
-    if not auth or not auth.startswith("Bearer "):
-        raise HTTPException(401, "Missing Authorization Bearer")
-    if auth.split(" ",1)[1] != API_KEY:
-        raise HTTPException(401, "Invalid API key")
+# --- FONCTIONS UTILITAIRES ---
+def _verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    """Vérifie le token Bearer saisi dans le cadenas ou envoyé par mobile."""
+    if credentials.credentials != API_KEY:
+        raise HTTPException(status_code=401, detail="Clé API invalide")
+    return credentials.credentials
 
 def _load():
     if not db: return {}
-    data = db.get("radiator_storage")
+    data = db.get("radiator_snapshot_storage")
     return json.loads(data) if data else {}
 
 def _save(d: dict):
     if db:
-        db.set("radiator_storage", json.dumps(d))
+        db.set("radiator_snapshot_storage", json.dumps(d))
 
-@app.get("/radiators/discover")
-async def discover(authorization: str | None = Header(default=None)):
-    _auth(authorization)
+# --- ROUTES API ---
+
+@app.get("/", tags=["Système"])
+async def root():
+    return {
+        "status": "online", 
+        "database": "connected" if db else "offline (REDIS_URL manquante)"
+    }
+
+@app.get("/radiators/discover", tags=["Radiateurs"])
+async def discover(token: str = Depends(_verify_token)):
+    """1 - Liste tous les radiateurs et leur état actuel"""
     cli = CozytouchClient(CT_USER, CT_PASS)
     setup = await cli.get_setup()
     out = []
@@ -43,73 +61,72 @@ async def discover(authorization: str | None = Header(default=None)):
         out.append({
             "label": d.get("label"),
             "deviceURL": d.get("deviceURL"),
-            "operating_mode": st.get("core:OperatingModeState"),
-            "heating_level": st.get("io:TargetHeatingLevelState"),
-            "target_temp": st.get("core:TargetTemperatureState"),
-            "comfort_room_temp": st.get("io:ComfortRoomSetpoint", st.get("core:ComfortRoomTemperature")),
-            "eco_room_temp": st.get("io:EcoRoomSetpoint", st.get("core:EcoRoomTemperature")),
+            "mode": st.get("core:OperatingModeState"),
+            "temp_actuelle": st.get("core:TargetTemperatureState")
         })
-    return {"ok": True, "radiators": out}
+    return {"radiators": out}
 
-@app.post("/radiator/snapshot")
-async def snapshot(authorization: str | None = Header(default=None),
-                   device_url: str = Query(..., description="deviceURL du radiateur à sauvegarder")):
-    _auth(authorization)
-    cli = CozytouchClient(CT_USER, CT_PASS)
-    setup = await cli.get_setup()
-    dev = next((d for d in cli.iter_devices(setup) if d.get("deviceURL")==device_url), None)
-    if not dev: raise HTTPException(404, "Radiateur introuvable")
-    st = CozytouchClient.states_map(dev)
-    store = _load()
-    store[device_url] = {
-        "label": dev.get("label"),
-        "states": {k: st.get(k) for k in [
-            "core:OperatingModeState","io:TargetHeatingLevelState","core:TargetTemperatureState",
-            "core:DerogationActiveState","core:DerogationEndDateTimeState",
-        ] if k in st}
-    }
-    _save(store)
-    return {"ok": True, "saved_for": device_url, "snapshot": store[device_url]}
-
-@app.post("/radiator/restore")
-async def restore(authorization: str | None = Header(default=None),
-                  device_url: str = Query(..., description="deviceURL du radiateur à restaurer")):
-    _auth(authorization)
-    store = _load()
-    snap = store.get(device_url)
-    if not snap: raise HTTPException(404, "Aucun snapshot pour ce device_url")
-
-    cmds, st = [], snap["states"]
-    if st.get("core:OperatingModeState"):
-        cmds.append({"name":"setOperatingMode","parameters":[st["core:OperatingModeState"]]})
-    if st.get("core:OperatingModeState")=="basic" and st.get("core:TargetTemperatureState") is not None:
-        cmds.append({"name":"setTargetTemperature","parameters":[float(st["core:TargetTemperatureState"])]})
-    if st.get("io:TargetHeatingLevelState"):
-        cmds.append({"name":"setTargetHeatingLevel","parameters":[st["io:TargetHeatingLevelState"]]})
-    if not cmds: raise HTTPException(400,"Snapshot incomplet : aucune commande applicable")
-
-    cli = CozytouchClient(CT_USER, CT_PASS)
-    res = await cli.send_commands(device_url, cmds)
-    return {"ok": True, "applied": cmds, "resp": res}
-
-@app.post("/radiators/program_eco")
-async def program_eco(authorization: str | None = Header(default=None)):
-    _auth(authorization)
+@app.post("/radiators/set_16_degrees", tags=["Actions"])
+async def set_16_all(token: str = Depends(_verify_token)):
+    """2 - Force tous les radiateurs à 16°C (Mode Manuel)"""
     cli = CozytouchClient(CT_USER, CT_PASS)
     setup = await cli.get_setup()
     results = []
     for d in cli.iter_devices(setup):
         if not CozytouchClient.is_radiator(d): continue
         url = d.get("deviceURL")
+        # Passage en mode 'basic' pour imposer strictement 16.0
         cmds = [
-            {"name":"setOperatingMode","parameters":["internal"]},
-            {"name":"setTargetHeatingLevel","parameters":["eco"]},
+            {"name": "setOperatingMode", "parameters": ["basic"]},
+            {"name": "setTargetTemperature", "parameters": [16.0]}
         ]
         try:
-            r = await cli.send_commands(url, cmds)
-            results.append({"deviceURL": url, "ok": True})
+            await cli.send_commands(url, cmds)
+            results.append({"label": d.get("label"), "status": "16°C OK"})
         except Exception as e:
-            results.append({"deviceURL": url, "ok": False, "error": str(e)})
+            results.append({"label": d.get("label"), "status": "Erreur", "msg": str(e)})
+    return {"ok": True, "results": results}
 
-    return {"ok": True, "count": len(results), "results": results}
+@app.post("/radiators/save_current_state", tags=["Sauvegarde"])
+async def save_all(token: str = Depends(_verify_token)):
+    """Sauvegarde le programme actuel de tous les radiateurs dans Redis"""
+    cli = CozytouchClient(CT_USER, CT_PASS)
+    setup = await cli.get_setup()
+    store = {}
+    for d in cli.iter_devices(setup):
+        if not CozytouchClient.is_radiator(d): continue
+        url = d.get("deviceURL")
+        st = CozytouchClient.states_map(d)
+        store[url] = {
+            "label": d.get("label"),
+            "states": {k: st.get(k) for k in [
+                "core:OperatingModeState","io:TargetHeatingLevelState","core:TargetTemperatureState"
+            ] if k in st}
+        }
+    _save(store)
+    return {"ok": True, "message": "État sauvegardé pour tous les radiateurs"}
 
+@app.post("/radiators/restore_program", tags=["Sauvegarde"])
+async def restore_all(token: str = Depends(_verify_token)):
+    """3 - Remet tous les radiateurs sur le programme sauvegardé"""
+    store = _load()
+    if not store: 
+        raise HTTPException(404, "Aucune sauvegarde trouvée dans Redis")
+    
+    cli = CozytouchClient(CT_USER, CT_PASS)
+    results = []
+    for url, data in store.items():
+        cmds, st = [], data["states"]
+        if st.get("core:OperatingModeState"):
+            cmds.append({"name":"setOperatingMode","parameters":[st["core:OperatingModeState"]]})
+        if st.get("core:OperatingModeState")=="basic" and st.get("core:TargetTemperatureState") is not None:
+            cmds.append({"name":"setTargetTemperature","parameters":[float(st["core:TargetTemperatureState"])]})
+        if st.get("io:TargetHeatingLevelState"):
+            cmds.append({"name":"setTargetHeatingLevel","parameters":[st["io:TargetHeatingLevelState"]]})
+        
+        try:
+            await cli.send_commands(url, cmds)
+            results.append({"label": data["label"], "status": "Restauré"})
+        except:
+            results.append({"label": data["label"], "status": "Échec"})
+    return {"ok": True, "results": results}
