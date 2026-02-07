@@ -13,9 +13,19 @@ class CozytouchClient:
 
     async def _oauth_token(self):
         async with httpx.AsyncClient(timeout=self.timeout) as cli:
-            data = {"grant_type":"password","username":f"GA-PRIVATEPERSON/{self.user}","password":self.passwd}
-            headers = {"Authorization":GA_BASIC_AUTH,"Content-Type":"application/x-www-form-urlencoded"}
-            r = await cli.post(GA_TOKEN_URL, data=data, headers=headers); r.raise_for_status()
+            data = {
+                "grant_type": "password",
+                "username": f"GA-PRIVATEPERSON/{self.user}",
+                "password": self.passwd
+            }
+            # Cette clé est le standard pour l'app mobile Cozytouch
+            headers = {
+                "Authorization": "Basic Q3RfMUpWeVRtSUxYOEllZkE3YVVOQmpGblpVYToyRWNORHpfZHkzNDJVSnFvMlo3cFNKTnZVdjBh",
+                "Content-Type": "application/x-www-form-urlencoded"
+            }
+            r = await cli.post(GA_TOKEN_URL, data=data, headers=headers)
+            if r.status_code != 200:
+                raise RuntimeError(f"Atlantic Auth Error {r.status_code}: {r.text}")
             return r.json()
 
     async def _jwt_token(self, access_token: str):
@@ -81,3 +91,4 @@ class CozytouchClient:
         for s in arr:
             n = s.get("name") or s.get("key"); out[n] = s.get("value")
         return out
+
