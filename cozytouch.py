@@ -1,0 +1,83 @@
+import os, time
+import httpx
+
+GA_TOKEN_URL = "https://apis.groupe-atlantic.com/token"
+GA_JWT_URL   = "https://apis.groupe-atlantic.com/magellan/accounts/jwt"
+# Vu publiquement dans des flows Node-RED communautaires ; Atlantic peut le faire évoluer.
+GA_BASIC_AUTH = "Basic Q3RfMUpWeVRtSUxYOEllZkE3YVVOQmpGblpVYToyRWNORHpfZHkzNDJVSnFvMlo3cFNKTnZVdjBh"
+
+class CozytouchClient:
+    def __init__(self, user, passwd, timeout=20.0):
+        self.user, self.passwd, self.timeout = user, passwd, timeout
+        self._oauth, self._jwt, self._jwt_exp = None, None, 0
+
+    async def _oauth_token(self):
+        async with httpx.AsyncClient(timeout=self.timeout) as cli:
+            data = {"grant_type":"password","username":f"GA-PRIVATEPERSON/{self.user}","password":self.passwd}
+            headers = {"Authorization":GA_BASIC_AUTH,"Content-Type":"application/x-www-form-urlencoded"}
+            r = await cli.post(GA_TOKEN_URL, data=data, headers=headers); r.raise_for_status()
+            return r.json()
+
+    async def _jwt_token(self, access_token: str):
+        async with httpx.AsyncClient(timeout=self.timeout) as cli:
+            r = await cli.get(GA_JWT_URL, headers={"Authorization": f"Bearer {access_token}"})
+            r.raise_for_status()
+            if r.headers.get("content-type","").startswith("application/json"): return r.json().get("token")
+            return r.text
+
+    async def token(self):
+        now = time.time()
+        if (not self._oauth) or now >= self._jwt_exp - 60:
+            self._oauth = await self._oauth_token()
+            self._jwt = await self._jwt_token(self._oauth["access_token"])
+            self._jwt_exp = now + int(self._oauth.get("expires_in", 3600))
+        return self._jwt
+
+    async def _ga(self, method, url, **kw):
+        jwt = await self.token()
+        headers = kw.pop("headers", {})
+        headers["Authorization"] = f"Bearer {jwt}"
+        async with httpx.AsyncClient(timeout=self.timeout) as cli:
+            r = await cli.request(method, url, headers=headers, **kw); r.raise_for_status()
+            if r.headers.get("content-type","").startswith("application/json"): return r.json()
+            return r.text
+
+    async def get_setup(self):
+        for path in [
+            "https://apis.groupe-atlantic.com/magellan/setup",
+            "https://apis.groupe-atlantic.com/magellan/v4/setup",
+            "https://apis.groupe-atlantic.com/magellan/registered/setup",
+        ]:
+            try: return await self._ga("GET", path)
+            except Exception: continue
+        raise RuntimeError("Setup Cozytouch introuvable (API)")
+
+    async def send_commands(self, device_url: str, commands: list[dict]):
+        payload = {"label":"Cozytouch API","actions":[{"deviceURL":device_url,"commands":commands}]}
+        for path in [
+            "https://apis.groupe-atlantic.com/magellan/exec/apply",
+            "https://apis.groupe-atlantic.com/magellan/v4/exec/apply",
+        ]:
+            try: return await self._ga("POST", path, json=payload)
+            except Exception: continue
+        raise RuntimeError("Impossible d'envoyer les commandes (exec/apply)")
+
+    @staticmethod
+    def iter_devices(setup: dict):
+        if "devices" in setup: yield from setup["devices"]
+        else:
+            for p in setup.get("places", []):
+                for d in p.get("devices", []): yield d
+
+    @staticmethod
+    def is_radiator(dev: dict) -> bool:
+        text = (dev.get("uiClass","") + dev.get("widget","") + dev.get("controllableName",""))
+        return ("ElectricalHeater" in text) or ("Heater" in text)
+
+    @staticmethod
+    def states_map(dev: dict) -> dict:
+        arr = dev.get("states") or dev.get("attributes") or []
+        out = {}
+        for s in arr:
+            n = s.get("name") or s.get("key"); out[n] = s.get("value")
+        return out
