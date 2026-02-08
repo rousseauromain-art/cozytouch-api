@@ -17,19 +17,26 @@ class CozytouchClient:
 
     async def _oauth_token(self):
         async with httpx.AsyncClient(timeout=self.timeout) as cli:
+            # On passe les données en dictionnaire simple
             data = {
                 "grant_type": "password",
                 "username": f"GA-PRIVATEPERSON/{self.user}",
-                "password": "Cozyius8nei9235!"
+                "password": self.passwd
             }
             headers = {
                 "Authorization": GA_BASIC_AUTH,
-                "Content-Type": "application/x-www-form-urlencoded",
                 "User-Agent": UA_COZYTOUCH
+                # On retire volontairement le Content-Type pour laisser httpx le gérer
             }
-            r = await cli.post(GA_TOKEN_URL, data=data, headers=headers)
+            # Teste l'envoi en JSON au lieu de DATA
+            r = await cli.post(GA_TOKEN_URL, data=data, headers=headers) 
+            
+            if r.status_code == 403:
+                # Si 403, on tente une dernière fois avec un format JSON pur
+                r = await cli.post(GA_TOKEN_URL, json=data, headers=headers)
+
             if r.status_code != 200:
-                raise RuntimeError(f"Atlantic Auth Error {r.status_code}: {r.text}")
+                raise RuntimeError(f"Erreur {r.status_code}: {r.text}")
             return r.json()
 
     async def _jwt_token(self, access_token: str):
@@ -105,4 +112,5 @@ class CozytouchClient:
             n = s.get("name") or s.get("key")
             out[n] = s.get("value")
         return out
+
 
