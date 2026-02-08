@@ -20,22 +20,24 @@ async def test_auth():
 
 @app.get("/radiators/discover")
 async def discover():
-    """Version brute : affiche TOUS les appareils sans filtrer"""
     setup = await client.get_setup()
-    if isinstance(setup, dict) and "error" in setup:
-        return setup
+    devices = []
     
-    all_devices = []
+    # On itère sur tous les appareils sans aucun filtre au début
     for d in client.iter_devices(setup):
-        # On récupère tout pour comprendre pourquoi le filtre bloquait
-        all_devices.append({
-            "nom": d.get("label"),
-            "type": d.get("uiClass"),
-            "widget": d.get("widget"),
-            "id_technique": d.get("controllableName"),
+        ui_class = d.get("uiClass")
+        widget = d.get("widget")
+        label = d.get("label", "Sans nom")
+        
+        # On enregistre tout pour le debug
+        devices.append({
+            "nom": label,
+            "type": ui_class,
+            "widget": widget,
             "url": d.get("deviceURL")
         })
-    return all_devices
+    
+    return devices if devices else {"message": "Aucun appareil trouvé dans le setup", "raw": setup}
 
 @app.post("/away-all")
 async def away_all(temperature: float = 16.0):
@@ -52,3 +54,4 @@ async def away_all(temperature: float = 16.0):
             res = await client.send_commands(url, cmd)
             results.append({"nom": d.get("label"), "res": res})
     return results
+
