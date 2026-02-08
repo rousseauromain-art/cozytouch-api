@@ -1,7 +1,6 @@
 import httpx
 import logging
 
-# Configuration du logging pour voir ce qui se passe dans les logs Koyeb
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -9,24 +8,16 @@ class CozytouchClient:
     def __init__(self, user, passwd):
         self.user = user
         self.passwd = passwd
-        # Serveurs Overkiz pour Atlantic
-        self.clusters = [
-            "https://ha101-1.overkiz.com/enduser-mobile-web/enduserapi",
-            "https://ha102-1.overkiz.com/enduser-mobile-web/enduserapi"
-        ]
-        self.base_url = self.clusters[0]
+        # Nouvelle structure d'URL pour éviter la 404
+        self.base_url = "https://ha101-1.overkiz.com/enduser-mobile-web/enduserapi"
         self.cookies = None
 
     async def login(self):
-        """
-        Authentification calquée sur pyoverkiz (Home Assistant).
-        Simule un appareil iOS pour éviter le blocage 'Cloud'.
-        """
+        """Authentification avec gestion de session persistante"""
+        # Utilisation d'un User-Agent générique mais propre
         headers = {
-            "User-Agent": "Cozytouch/4.3.0 (iPhone; iOS 16.0; Scale/3.00)",
             "Content-Type": "application/x-www-form-urlencoded",
-            "Accept": "application/json, text/plain, */*",
-            "Accept-Language": "fr-FR,fr;q=0.9"
+            "User-Agent": "Cozytouch/4.3.0 (Android; 13)"
         }
         
         payload = {
@@ -35,74 +26,49 @@ class CozytouchClient:
         }
 
         async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as cli:
-            for url in self.clusters:
-                try:
-                    logger.info(f"Tentative de connexion sur {url}...")
-                    
-                    # 1. On initialise la session (Handshake)
-                    await cli.get(f"{url}/login", headers=headers)
-                    
-                    # 2. On envoie les identifiants
-                    res = await cli.post(f"{url}/login", data=payload, headers=headers)
-                    
-                    if res.status_code == 200:
-                        self.cookies = res.cookies
-                        self.base_url = url
-                        logger.info(f"Connexion réussie sur {url}")
-                        return True, "Success"
-                    else:
-                        logger.warning(f"Echec sur {url}: Code {res.status_code}")
-                        
-                except Exception as e:
-                    logger.error(f"Erreur réseau sur {url}: {str(e)}")
-                    continue
-            
-            return False, "Tous les serveurs Overkiz ont refusé la connexion"
+            try:
+                # Tentative de login directe
+                login_url = f"{self.base_url}/login"
+                res = await cli.post(login_url, data=payload, headers=headers)
+                
+                if res.status_code == 200:
+                    self.cookies = res.cookies
+                    logger.info("Connexion Overkiz réussie")
+                    return True, "Success"
+                
+                # Si 404 ou 401, on tente le cluster ha102
+                if res.status_code in [404, 401]:
+                    alt_url = "https://ha102-1.overkiz.com/enduser-mobile-web/enduserapi"
+                    res_alt = await cli.post(f"{alt_url}/login", data=payload, headers=headers)
+                    if res_alt.status_code == 200:
+                        self.base_url = alt_url
+                        self.cookies = res_alt.cookies
+                        return True, "Success (Cluster 2)"
+                
+                return False, f"Refusé (Code {res.status_code})"
+
+            except Exception as e:
+                return False, f"Erreur connexion : {str(e)}"
 
     async def get_setup(self):
-        """Récupère la liste des équipements (Setup)"""
+        """Récupération de tes Oniris"""
         if not self.cookies:
             success, msg = await self.login()
             if not success:
-                return {"error": "Authentication Failed", "details": msg}
-        
-        headers = {"User-Agent": "Cozytouch/4.3.0 (iPhone; iOS 16.0; Scale/3.00)"}
+                return {"error": "Auth failed", "details": msg}
         
         async with httpx.AsyncClient(timeout=30.0) as cli:
-            try:
-                res = await cli.get(f"{self.base_url}/setup", cookies=self.cookies, headers=headers)
-                if res.status_code == 200:
-                    return res.json()
-                elif res.status_code in [401, 403]:
-                    # Session expirée ou rejetée, on tente de se reconnecter une fois
-                    self.cookies = None
-                    return await self.get_setup()
-                return {"error": f"Erreur serveur {res.status_code}", "body": res.text}
-            except Exception as e:
-                return {"error": "Requête Setup échouée", "details": str(e)}
+            # L'appel au setup ne doit PAS avoir /login dans l'URL
+            res = await cli.get(f"{self.base_url}/setup", cookies=self.cookies)
+            if res.status_code == 200:
+                return res.json()
+            return {"error": f"Erreur {res.status_code}", "body": res.text}
 
     async def send_command(self, device_url, commands):
-        """Exécute une commande sur un appareil"""
-        if not self.cookies:
-            await self.login()
-            
-        headers = {"User-Agent": "Cozytouch/4.3.0 (iPhone; iOS 16.0; Scale/3.00)"}
+        """Envoi d'ordre (16°C, etc.)"""
+        if not self.cookies: await self.login()
         url = f"{self.base_url}/exec/apply"
-        
-        payload = {
-            "label": "Action_Koyeb",
-            "actions": [
-                {
-                    "deviceURL": device_url,
-                    "commands": commands
-                }
-            ]
-        }
-        
+        payload = {"label": "Action", "actions": [{"deviceURL": device_url, "commands": commands}]}
         async with httpx.AsyncClient(timeout=30.0) as cli:
-            try:
-                res = await cli.post(url, json=payload, cookies=self.cookies, headers=headers)
-                return res.status_code
-            except Exception as e:
-                logger.error(f"Erreur lors de l'envoi de la commande: {e}")
-                return 500
+            res = await cli.post(url, json=payload, cookies=self.cookies)
+            return res.status_code
