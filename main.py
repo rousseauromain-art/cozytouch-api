@@ -139,3 +139,19 @@ async def test_auth(token: str = Depends(_verify_token)):
         return {"status": "Authentification réussie", "token_prefix": jwt[:15]}
     except Exception as e:
         return {"status": "Erreur d'identifiants", "detail": str(e)}
+
+@app.post("/radiators/away-mode")
+async def set_away_16(device_url: str):
+    # On définit d'abord la température de dérogation (16°C)
+    # Puis on bascule en mode absence (away)
+    commands = [
+        {
+            "name": "setDerogatedTargetTemperature", 
+            "parameters": [16.0]
+        },
+        {
+            "name": "setOperatingMode", 
+            "parameters": ["away"] 
+        }
+    ]
+    return await client.send_commands(device_url, commands)
