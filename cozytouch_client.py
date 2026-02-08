@@ -21,7 +21,7 @@ class CozytouchClient:
             # On passe les données en dictionnaire simple
             data = {
                 "grant_type": "password",
-                "username": f"GA-PRIVATEPERSON/rousseau.romain@gmail.com" #f"GA-PRIVATEPERSON/{urllib.parse.quote(self.user)}",
+                "username": f"GA-PRIVATEPERSON/rousseau.romain@gmail.com", #f"GA-PRIVATEPERSON/{urllib.parse.quote(self.user)}",
                 "password": "Cozyius8nei9235!" #self.passwd
             }
             headers = {
@@ -113,6 +113,7 @@ class CozytouchClient:
             n = s.get("name") or s.get("key")
             out[n] = s.get("value")
         return out
+
 
 
 
