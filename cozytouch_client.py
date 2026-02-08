@@ -1,75 +1,40 @@
 import httpx
-import asyncio
-import logging
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 class CozytouchClient:
     def __init__(self, user, passwd):
         self.user = user
         self.passwd = passwd
+        self.base_url = "https://ha101-1.overkiz.com/enduser-mobile-web/enduserapi"
         self.cookies = None
-        self.base_url = None
-        
-        # Les 4 "portes" possibles pour Atlantic/Overkiz
-        self.endpoints = [
-            "https://ha101-1.overkiz.com/enduser-mobile-web/enduserapi",
-            "https://ha101-1.overkiz.com/enduserapi",
-            "https://ha102-1.overkiz.com/enduser-mobile-web/enduserapi",
-            "https://ha102-1.overkiz.com/enduserapi"
-        ]
 
     async def login(self):
+        # On imite EXACTEMENT un iPhone pour passer sous les radars
         headers = {
-            "User-Agent": "Cozytouch/4.3.0 (Android; 13)",
+            "Host": "ha101-1.overkiz.com",
             "Content-Type": "application/x-www-form-urlencoded",
-            "Accept": "application/json"
+            "Accept": "*/*",
+            "User-Agent": "Cozytouch/4.3.0 (com.groupe-atlantic.cozytouch; build:1; iOS 16.5.0) Alamofire/5.4.3",
+            "Accept-Language": "fr-FR;q=1.0",
+            "Connection": "keep-alive"
         }
+        
         payload = {"userId": self.user, "userPassword": self.passwd}
 
-        results = []
-        for url in self.endpoints:
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as cli:
             try:
-                async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as cli:
-                    # Tentative de handshake
-                    await cli.get(f"{url}/login", headers=headers)
-                    res = await cli.post(f"{url}/login", data=payload, headers=headers)
-                    
-                    if res.status_code == 200:
-                        self.base_url = url
-                        self.cookies = res.cookies
-                        logger.info(f"Porte trouvée : {url}")
-                        return True, f"Success on {url}"
-                    
-                    results.append(f"{url} -> {res.status_code}")
+                # Le secret : on ne fait PAS de GET avant, on fonce direct sur le POST
+                res = await cli.post(f"{self.base_url}/login", data=payload, headers=headers)
+                
+                if res.status_code == 200:
+                    self.cookies = res.cookies
+                    return True, "Success"
+                return False, f"Status {res.status_code}"
             except Exception as e:
-                results.append(f"{url} -> Erreur: {str(e)}")
-
-        return False, " | ".join(results)
+                return False, str(e)
 
     async def get_setup(self):
-        """Cette fonction va maintenant nous servir de rapport de scan"""
-        success, report = await self.login()
-        if not success:
-            return {
-                "error": "Toutes les portes ont échoué",
-                "details": report,
-                "note": "Si tout est en 404/401, Atlantic bloque peut-être l'IP de Koyeb"
-            }
-        
-        # Si on a trouvé une porte, on récupère le setup
-        async with httpx.AsyncClient(timeout=20.0) as cli:
-            res = await cli.get(f"{self.base_url}/setup", cookies=self.cookies)
-            return {
-                "message": "Porte trouvée !",
-                "url_valide": self.base_url,
-                "data": res.json()
-            }
-
-    async def send_command(self, device_url, commands):
         if not self.cookies: await self.login()
-        url = f"{self.base_url}/exec/apply"
-        async with httpx.AsyncClient(timeout=20.0) as cli:
-            res = await cli.post(url, json={"actions": [{"deviceURL": device_url, "commands": commands}]}, cookies=self.cookies)
-            return res.status_code
+        headers = {"User-Agent": "Cozytouch/4.3.0 (com.groupe-atlantic.cozytouch; build:1; iOS 16.5.0)"}
+        async with httpx.AsyncClient(timeout=30.0) as cli:
+            res = await cli.get(f"{self.base_url}/setup", cookies=self.cookies, headers=headers)
+            return res.json() if res.status_code == 200 else {"error": res.status_code}
