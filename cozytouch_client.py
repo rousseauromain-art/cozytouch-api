@@ -81,6 +81,7 @@ class CozytouchClient:
 
     async def get_setup(self):
         paths = [
+            "https://apis.groupe-atlantic.com/magellan/v1/setup",
             "https://apis.groupe-atlantic.com/magellan/setup",
             "https://apis.groupe-atlantic.com/magellan/v4/setup"
         ]
@@ -116,4 +117,5 @@ class CozytouchClient:
         for s in (dev.get("states") or []):
             out[s.get("name")] = s.get("value")
         return out
+
 
