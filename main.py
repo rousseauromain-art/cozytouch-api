@@ -47,30 +47,42 @@ async def discover():
 
 @app.post("/away-all")
 async def away_all(temperature: float = 16.0):
-    """Bascule tous les radiateurs à la température choisie"""
+    """Bascule les radiateurs en mode Manuel à 16°C"""
     setup = await client.get_setup()
-    if isinstance(setup, dict) and "error" in setup:
-        return setup
-        
     results = []
-    raw_devices = setup.get("devices", [])
     
-    for d in raw_devices:
+    for d in setup.get("devices", []):
         ui_class = d.get("uiClass", "")
         if ui_class and ("Heating" in ui_class or "Heater" in ui_class):
             url = d.get("deviceURL")
             
-            # Les commandes validées par ton mode Debug
+            # COMMANDE VALIDÉE : On passe en manuel ET on fixe la température
             cmds = [
-                {"name": "setDerogatedTargetTemperature", "parameters": [temperature]},
-                {"name": "setOperatingMode", "parameters": ["away"]}
+                {"name": "setTargetTemperature", "parameters": [temperature]},
+                {"name": "setOperatingMode", "parameters": ["manual"]}
             ]
             
-            # On appelle 'send_command' (sans 's') comme défini dans ton client
             status = await client.send_command(url, cmds)
-            results.append({
-                "nom": d.get("label"), 
-                "statut_http": status
-            })
+            results.append({"nom": d.get("label"), "statut_http": status})
             
-    return {"action": "Mise en mode absence", "resultats": results}
+    return {"action": "Mode Absence activé (16°C)", "details": results}
+
+@app.post("/back-home")
+async def back_home():
+    """RETOUR PROGRAMMATION : Utilise le terme 'internalScheduling' vu dans ton debug"""
+    setup = await client.get_setup()
+    results = []
+    
+    for d in setup.get("devices", []):
+        ui_class = d.get("uiClass", "")
+        if ui_class and ("Heating" in ui_class or "Heater" in ui_class):
+            url = d.get("deviceURL")
+            
+            # On remet le mode AUTO / PROG
+            cmds = [{"name": "setOperatingMode", "parameters": ["internalScheduling"]}]
+            
+            status = await client.send_command(url, cmds)
+            results.append({"nom": d.get("label"), "statut_http": status})
+            
+    return {"action": "Reprise de la programmation", "details": results}
+
