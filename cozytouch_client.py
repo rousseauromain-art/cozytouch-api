@@ -13,19 +13,19 @@ class CozytouchClient:
         self.cookies = None
 
     async def login(self):
+        """Authentification Overkiz avec gestion de session"""
         headers = {"User-Agent": "Cozytouch/4.3.0", "Content-Type": "application/x-www-form-urlencoded"}
         payload = {"userId": self.user, "userPassword": self.passwd}
 
         async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as cli:
             for url in self.clusters:
                 try:
-                    # On initialise la session sur le cluster
+                    # Initialisation session
                     await cli.get(f"{url}/login", headers=headers)
-                    # On tente l'auth
+                    # Tentative de login
                     res = await cli.post(f"{url}/login", data=payload, headers=headers)
-                    
                     if res.status_code == 200:
-                        self.base_url = url # On mémorise le bon cluster
+                        self.base_url = url
                         self.cookies = res.cookies
                         return True
                 except Exception:
@@ -34,32 +34,20 @@ class CozytouchClient:
 
     async def get_setup(self):
         if not self.cookies:
-            success = await self.login()
-            if not success: return {"error": "Authentification échouée sur tous les serveurs"}
+            if not await self.login(): return {"error": "Auth failed"}
         
         async with httpx.AsyncClient(timeout=15.0) as cli:
             res = await cli.get(f"{self.base_url}/setup", cookies=self.cookies)
             return res.json()
 
     async def send_command(self, device_url, commands):
-        """Envoie une commande spécifique à un appareil"""
         if not self.cookies:
             await self.login()
-            
         url = f"{self.base_url}/exec/apply"
-        # Structure de données spécifique à l'API Overkiz
         payload = {
-            "label": "Action via API Koyeb",
-            "actions": [
-                {
-                    "deviceURL": device_url,
-                    "commands": commands
-                }
-            ]
+            "label": "Action via API",
+            "actions": [{"deviceURL": device_url, "commands": commands}]
         }
-        
         async with httpx.AsyncClient(timeout=15.0) as cli:
             res = await cli.post(url, json=payload, cookies=self.cookies)
             return res.status_code
-
-
