@@ -20,7 +20,7 @@ class CozytouchClient:
             data = {
                 "grant_type": "password",
                 "username": f"GA-PRIVATEPERSON/{self.user}",
-                "password": self.passwd
+                "password": "Cozyius8nei9235!"
             }
             headers = {
                 "Authorization": GA_BASIC_AUTH,
@@ -105,3 +105,4 @@ class CozytouchClient:
             n = s.get("name") or s.get("key")
             out[n] = s.get("value")
         return out
+
