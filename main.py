@@ -2,56 +2,68 @@ import os
 from fastapi import FastAPI
 from cozytouch_client import CozytouchClient
 
-app = FastAPI(title="Cozytouch API - Debug Mode")
+app = FastAPI(title="Mon API Chauffage Atlantic")
 
+# Initialisation du client avec tes variables Koyeb
 client = CozytouchClient(
     user=os.getenv("CT_USER"),
     passwd=os.getenv("CT_PASS")
 )
 
 @app.get("/debug-vars")
-async def debug_vars():
-    user = os.getenv("CT_USER")
-    return {"user_detecte": user is not None, "python": os.sys.version}
-
-@app.get("/test-auth")
-async def test_auth():
-    return await client.token()
+async def debug():
+    return {"user_configuré": os.getenv("CT_USER") is not None}
 
 @app.get("/radiators/discover")
 async def discover():
+    """Affiche tous les radiateurs détectés pour vérifier que le pont fonctionne"""
     setup = await client.get_setup()
+    if "error" in setup:
+        return setup
+    
     devices = []
-    
-    # On itère sur tous les appareils sans aucun filtre au début
-    for d in client.iter_devices(setup):
-        ui_class = d.get("uiClass")
-        widget = d.get("widget")
-        label = d.get("label", "Sans nom")
-        
-        # On enregistre tout pour le debug
-        devices.append({
-            "nom": label,
-            "type": ui_class,
-            "widget": widget,
-            "url": d.get("deviceURL")
-        })
-    
-    return devices if devices else {"message": "Aucun appareil trouvé dans le setup", "raw": setup}
+    for d in setup.get("devices", []):
+        # On filtre pour n'afficher que les radiateurs et sèche-serviettes
+        ui_class = d.get("uiClass", "")
+        if "Heating" in ui_class or "Heater" in ui_class:
+            devices.append({
+                "nom": d.get("label"),
+                "type": ui_class,
+                "url": d.get("deviceURL")
+            })
+    return devices
 
 @app.post("/away-all")
-async def away_all(temperature: float = 16.0):
+async def set_away_all(temp: float = 16.0):
+    """L'ACTION FINALE : Met tous les radiateurs à 16°C en mode Absence"""
     setup = await client.get_setup()
+    if "error" in setup: return setup
+    
     results = []
-    for d in client.iter_devices(setup):
-        # On force l'envoi à tous les appareils de type 'Heater' ou 'Radiator'
-        if any(x in str(d.get("uiClass")) for x in ["Heating", "Heater"]):
-            url = d.get("deviceURL")
-            cmd = [
-                {"name": "setDerogatedTargetTemperature", "parameters": [temperature]},
+    for d in setup.get("devices", []):
+        ui_class = d.get("uiClass", "")
+        if "Heating" in ui_class or "Heater" in ui_class:
+            device_url = d.get("deviceURL")
+            
+            # Les commandes identifiées via ton mode Debug Overkiz
+            commands = [
+                {"name": "setDerogatedTargetTemperature", "parameters": [temp]},
                 {"name": "setOperatingMode", "parameters": ["away"]}
             ]
-            res = await client.send_commands(url, cmd)
-            results.append({"nom": d.get("label"), "res": res})
-    return results
+            
+            status = await client.send_command(device_url, commands)
+            results.append({"nom": d.get("label"), "code_retour": status})
+            
+    return {"message": "Ordre envoyé à la maison", "details": results}
 
+@app.post("/back-to-auto")
+async def back_to_auto():
+    """Optionnel : Repasse tout en mode auto via l'API (si tu ne veux pas utiliser l'app)"""
+    setup = await client.get_setup()
+    results = []
+    for d in setup.get("devices", []):
+        if "Heating" in d.get("uiClass", ""):
+            commands = [{"name": "setOperatingMode", "parameters": ["auto"]}]
+            status = await client.send_command(d.get("deviceURL"), commands)
+            results.append({"nom": d.get("label"), "status": status})
+    return results
