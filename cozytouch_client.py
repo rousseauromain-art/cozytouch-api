@@ -80,19 +80,30 @@ class CozytouchClient:
             return r.json() if "application/json" in r.headers.get("content-type", "") else r.text
 
     async def get_setup(self):
-        # On ne garde QUE la v1 pour forcer le test
         url = "https://apis.groupe-atlantic.com/magellan/v1/setup"
         
-        res = await self._ga("GET", url)
-        
-        # Si c'est une erreur, on renvoie tout pour comprendre
-        if isinstance(res, dict) and "error" in res:
-            return {
-                "identifiant_utilisé": url,
-                "message_erreur": res.get("error"),
-                "contenu_brut": res.get("body", "Aucun contenu")
+        # On utilise un client qui gère les cookies automatiquement
+        async with httpx.AsyncClient(timeout=self.timeout, follow_redirects=True) as cli:
+            # 1. On récupère le token
+            token = await self.token()
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "User-Agent": "Cozytouch/4.3.0 (com.groupe-atlantic.cozytouch; build:1; iOS 16.0.0) Alamofire/5.4.3"
             }
-        return res
+            
+            # 2. On tente l'appel
+            r = await cli.get(url, headers=headers)
+            
+            # Si le corps est vide ou [], on tente une version alternative
+            if r.status_code == 200 and (not r.text or r.text == "[]"):
+                # Plan B : On tente sans le 'v1' si la réponse était vide
+                alt_url = "https://apis.groupe-atlantic.com/magellan/setup"
+                r = await cli.get(alt_url, headers=headers)
+
+            try:
+                return r.json()
+            except:
+                return {"error": "Réponse non JSON", "body": r.text, "code": r.status_code}
     
     async def send_commands(self, device_url: str, commands: list[dict]):
         payload = {"label":"API-Control","actions":[{"deviceURL":device_url,"commands":commands}]}
@@ -117,6 +128,7 @@ class CozytouchClient:
         for s in (dev.get("states") or []):
             out[s.get("name")] = s.get("value")
         return out
+
 
 
 
