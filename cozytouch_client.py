@@ -88,20 +88,17 @@ class CozytouchClient:
             self._jwt_exp = now + int(self._oauth.get("expires_in", 3600))
         return self._jwt
 
-    async def _ga(self, method, url, **kw):
-        jwt = await self.token()
-        if isinstance(jwt, dict) and "error" in jwt:
-            return jwt
-        
-        headers = kw.pop("headers", {})
-        headers["Authorization"] = f"Bearer {jwt}"
-        headers["User-Agent"] = UA_COZYTOUCH
-        
-        async with httpx.AsyncClient(timeout=self.timeout) as cli:
-            r = await cli.request(method, url, headers=headers, **kw)
-            if r.status_code >= 400:
-                return {"error": f"API Error {r.status_code}", "url": url, "body": r.text}
-            return r.json() if "application/json" in r.headers.get("content-type", "") else r.text
+    async def _ga(self, method, url, data=None):
+        # On utilise une session pour garder les cookies (JSESSIONID)
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as cli:
+            if "login" not in url:
+                # On récupère les cookies de session avant l'appel
+                cookies = await self.login() 
+                res = await cli.request(method, url, data=data, cookies=cookies)
+            else:
+                res = await cli.request(method, url, data=data)
+            
+            return res.json()
     
     async def send_commands(self, device_url: str, commands: list[dict]):
         payload = {"label":"API-Control","actions":[{"deviceURL":device_url,"commands":commands}]}
@@ -126,6 +123,7 @@ class CozytouchClient:
         for s in (dev.get("states") or []):
             out[s.get("name")] = s.get("value")
         return out
+
 
 
 
