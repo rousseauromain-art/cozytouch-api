@@ -1,5 +1,6 @@
 import os, time
 import httpx
+import urllib.parse
 
 GA_TOKEN_URL = "https://apis.groupe-atlantic.com/token"
 GA_JWT_URL   = "https://apis.groupe-atlantic.com/magellan/accounts/jwt"
@@ -20,7 +21,7 @@ class CozytouchClient:
             # On passe les données en dictionnaire simple
             data = {
                 "grant_type": "password",
-                "username": f"GA-PRIVATEPERSON/{self.user}",
+                "username": f"GA-PRIVATEPERSON/{urllib.parse.quote(self.user)}",
                 "password": self.passwd
             }
             headers = {
@@ -112,5 +113,6 @@ class CozytouchClient:
             n = s.get("name") or s.get("key")
             out[n] = s.get("value")
         return out
+
 
 
