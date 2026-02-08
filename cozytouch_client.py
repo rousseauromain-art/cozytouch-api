@@ -80,20 +80,20 @@ class CozytouchClient:
             return r.json() if "application/json" in r.headers.get("content-type", "") else r.text
 
     async def get_setup(self):
-        paths = [
-            "https://apis.groupe-atlantic.com/magellan/v1/setup",
-            "https://apis.groupe-atlantic.com/magellan/setup",
-            "https://apis.groupe-atlantic.com/magellan/v4/setup"
-        ]
-        last_err = None
-        for path in paths:
-            res = await self._ga("GET", path)
-            if isinstance(res, dict) and "error" in res:
-                last_err = res
-                continue
-            return res
-        return {"error": "Setup inaccessible", "details": last_err}
-
+        # On ne garde QUE la v1 pour forcer le test
+        url = "https://apis.groupe-atlantic.com/magellan/v1/setup"
+        
+        res = await self._ga("GET", url)
+        
+        # Si c'est une erreur, on renvoie tout pour comprendre
+        if isinstance(res, dict) and "error" in res:
+            return {
+                "identifiant_utilisé": url,
+                "message_erreur": res.get("error"),
+                "contenu_brut": res.get("body", "Aucun contenu")
+            }
+        return res
+    
     async def send_commands(self, device_url: str, commands: list[dict]):
         payload = {"label":"API-Control","actions":[{"deviceURL":device_url,"commands":commands}]}
         return await self._ga("POST", "https://apis.groupe-atlantic.com/magellan/exec/apply", json=payload)
@@ -117,5 +117,6 @@ class CozytouchClient:
         for s in (dev.get("states") or []):
             out[s.get("name")] = s.get("value")
         return out
+
 
 
