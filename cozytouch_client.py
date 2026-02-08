@@ -3,8 +3,10 @@ import httpx
 
 GA_TOKEN_URL = "https://apis.groupe-atlantic.com/token"
 GA_JWT_URL   = "https://apis.groupe-atlantic.com/magellan/accounts/jwt"
-# Vu publiquement dans des flows Node-RED communautaires ; Atlantic peut le faire évoluer.
 GA_BASIC_AUTH = "Basic Q3RfMUpWeVRtSUxYOEllZkE3YVVOQmpGblpVYToyRWNORHpfZHkzNDJVSnFvMlo3cFNKTnZVdjBh"
+
+# Ce User-Agent fait croire à Atlantic que la requête vient de l'app officielle
+UA_COZYTOUCH = "Cozytouch/2.10.0 (iPhone; iOS 15.0; Scale/3.00)"
 
 class CozytouchClient:
     def __init__(self, user, passwd, timeout=20.0):
@@ -20,10 +22,10 @@ class CozytouchClient:
                 "username": f"GA-PRIVATEPERSON/{self.user}",
                 "password": self.passwd
             }
-            # Cette clé est le standard pour l'app mobile Cozytouch
             headers = {
-                "Authorization": "Basic Q3RfMUpWeVRtSUxYOEllZkE3YVVOQmpGblpVYToyRWNORHpfZHkzNDJVSnFvMlo3cFNKTnZVdjBh",
-                "Content-Type": "application/x-www-form-urlencoded"
+                "Authorization": GA_BASIC_AUTH,
+                "Content-Type": "application/x-www-form-urlencoded",
+                "User-Agent": UA_COZYTOUCH
             }
             r = await cli.post(GA_TOKEN_URL, data=data, headers=headers)
             if r.status_code != 200:
@@ -31,10 +33,15 @@ class CozytouchClient:
             return r.json()
 
     async def _jwt_token(self, access_token: str):
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "User-Agent": UA_COZYTOUCH
+        }
         async with httpx.AsyncClient(timeout=self.timeout) as cli:
-            r = await cli.get(GA_JWT_URL, headers={"Authorization": f"Bearer {access_token}"})
+            r = await cli.get(GA_JWT_URL, headers=headers)
             r.raise_for_status()
-            if r.headers.get("content-type","").startswith("application/json"): return r.json().get("token")
+            if r.headers.get("content-type","").startswith("application/json"):
+                return r.json().get("token")
             return r.text
 
     async def token(self):
@@ -49,12 +56,16 @@ class CozytouchClient:
         jwt = await self.token()
         headers = kw.pop("headers", {})
         headers["Authorization"] = f"Bearer {jwt}"
+        headers["User-Agent"] = UA_COZYTOUCH
         async with httpx.AsyncClient(timeout=self.timeout) as cli:
-            r = await cli.request(method, url, headers=headers, **kw); r.raise_for_status()
-            if r.headers.get("content-type","").startswith("application/json"): return r.json()
+            r = await cli.request(method, url, headers=headers, **kw)
+            r.raise_for_status()
+            if r.headers.get("content-type","").startswith("application/json"):
+                return r.json()
             return r.text
 
     async def get_setup(self):
+        # On essaie les différentes versions de l'API Setup
         for path in [
             "https://apis.groupe-atlantic.com/magellan/setup",
             "https://apis.groupe-atlantic.com/magellan/v4/setup",
@@ -91,8 +102,6 @@ class CozytouchClient:
         arr = dev.get("states") or dev.get("attributes") or []
         out = {}
         for s in arr:
-            n = s.get("name") or s.get("key"); out[n] = s.get("value")
+            n = s.get("name") or s.get("key")
+            out[n] = s.get("value")
         return out
-
-
-
