@@ -36,7 +36,7 @@ class CozytouchClient:
                 r = await cli.post(GA_TOKEN_URL, json=data, headers=headers)
 
             if r.status_code != 200:
-                raise RuntimeError(f"Erreur {r.status_code}: {r.text}")
+                return {"status": "Echec Atlantic", "code": r.status_code, "reponse": r.text} #raise RuntimeError(f"Erreur {r.status_code}: {r.text}")
             return r.json()
 
     async def _jwt_token(self, access_token: str):
@@ -112,6 +112,7 @@ class CozytouchClient:
             n = s.get("name") or s.get("key")
             out[n] = s.get("value")
         return out
+
 
 
 
