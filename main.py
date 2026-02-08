@@ -2,68 +2,75 @@ import os
 from fastapi import FastAPI
 from cozytouch_client import CozytouchClient
 
-app = FastAPI(title="Mon API Chauffage Atlantic")
+app = FastAPI(title="Cozytouch API - Overkiz Bridge V2")
 
-# Initialisation du client avec tes variables Koyeb
+# Initialisation du client
 client = CozytouchClient(
     user=os.getenv("CT_USER"),
     passwd=os.getenv("CT_PASS")
 )
 
 @app.get("/debug-vars")
-async def debug():
-    return {"user_configuré": os.getenv("CT_USER") is not None}
+async def debug_vars():
+    user = os.getenv("CT_USER")
+    return {
+        "user_configure": user is not None, 
+        "python": os.sys.version,
+        "serveur_cible": client.base_url
+    }
 
 @app.get("/radiators/discover")
 async def discover():
-    """Affiche tous les radiateurs détectés pour vérifier que le pont fonctionne"""
+    """Détecte tes Oniris et ton Adelis"""
     setup = await client.get_setup()
-    if "error" in setup:
+    
+    # Gestion d'erreur si le login a échoué
+    if isinstance(setup, dict) and "error" in setup:
         return setup
     
     devices = []
-    for d in setup.get("devices", []):
-        # On filtre pour n'afficher que les radiateurs et sèche-serviettes
+    # Dans Overkiz, les appareils sont dans la clé 'devices'
+    raw_devices = setup.get("devices", [])
+    
+    for d in raw_devices:
         ui_class = d.get("uiClass", "")
-        if "Heating" in ui_class or "Heater" in ui_class:
+        # On filtre pour ne garder que le chauffage
+        if ui_class and ("Heating" in ui_class or "Heater" in ui_class):
             devices.append({
-                "nom": d.get("label"),
+                "nom": d.get("label", "Sans nom"),
                 "type": ui_class,
+                "widget": d.get("widget"),
                 "url": d.get("deviceURL")
             })
-    return devices
+    
+    return devices if devices else {"message": "Aucun radiateur trouvé", "brut": setup}
 
 @app.post("/away-all")
-async def set_away_all(temp: float = 16.0):
-    """L'ACTION FINALE : Met tous les radiateurs à 16°C en mode Absence"""
+async def away_all(temperature: float = 16.0):
+    """Bascule tous les radiateurs à la température choisie"""
     setup = await client.get_setup()
-    if "error" in setup: return setup
-    
+    if isinstance(setup, dict) and "error" in setup:
+        return setup
+        
     results = []
-    for d in setup.get("devices", []):
+    raw_devices = setup.get("devices", [])
+    
+    for d in raw_devices:
         ui_class = d.get("uiClass", "")
-        if "Heating" in ui_class or "Heater" in ui_class:
-            device_url = d.get("deviceURL")
+        if ui_class and ("Heating" in ui_class or "Heater" in ui_class):
+            url = d.get("deviceURL")
             
-            # Les commandes identifiées via ton mode Debug Overkiz
-            commands = [
-                {"name": "setDerogatedTargetTemperature", "parameters": [temp]},
+            # Les commandes validées par ton mode Debug
+            cmds = [
+                {"name": "setDerogatedTargetTemperature", "parameters": [temperature]},
                 {"name": "setOperatingMode", "parameters": ["away"]}
             ]
             
-            status = await client.send_command(device_url, commands)
-            results.append({"nom": d.get("label"), "code_retour": status})
+            # On appelle 'send_command' (sans 's') comme défini dans ton client
+            status = await client.send_command(url, cmds)
+            results.append({
+                "nom": d.get("label"), 
+                "statut_http": status
+            })
             
-    return {"message": "Ordre envoyé à la maison", "details": results}
-
-@app.post("/back-to-auto")
-async def back_to_auto():
-    """Optionnel : Repasse tout en mode auto via l'API (si tu ne veux pas utiliser l'app)"""
-    setup = await client.get_setup()
-    results = []
-    for d in setup.get("devices", []):
-        if "Heating" in d.get("uiClass", ""):
-            commands = [{"name": "setOperatingMode", "parameters": ["auto"]}]
-            status = await client.send_command(d.get("deviceURL"), commands)
-            results.append({"nom": d.get("label"), "status": status})
-    return results
+    return {"action": "Mise en mode absence", "resultats": results}
