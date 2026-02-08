@@ -6,7 +6,6 @@ GA_TOKEN_URL = "https://apis.groupe-atlantic.com/token"
 GA_JWT_URL   = "https://apis.groupe-atlantic.com/magellan/accounts/jwt"
 GA_BASIC_AUTH = "Basic Q3RfMUpWeVRtSUxYOEllZkE3YVVOQmpGblpVYToyRWNORHpfZHkzNDJVSnFvMlo3cFNKTnZVdjBh"
 
-# Ce User-Agent fait croire à Atlantic que la requête vient de l'app officielle
 UA_COZYTOUCH = "Cozytouch/2.10.0 (iPhone; iOS 15.0; Scale/3.00)"
 
 class CozytouchClient:
@@ -15,7 +14,7 @@ class CozytouchClient:
         self.passwd = passwd
         self.timeout = timeout
         self._oauth, self._jwt, self._jwt_exp = None, None, 0
-        
+
     async def _oauth_token(self):
         async with httpx.AsyncClient(timeout=self.timeout) as cli:
             data = {
@@ -29,15 +28,13 @@ class CozytouchClient:
                 "User-Agent": UA_COZYTOUCH
             }
             
-            # Teste l'envoi en DATA
-            r = await cli.post(GA_TOKEN_URL, data=data, headers=headers) 
+            # Appel API
+            r = await cli.post(GA_TOKEN_URL, data=data, headers=headers)
             
             if r.status_code == 403:
-                # Si 403, on tente une dernière fois avec un format JSON pur
                 r = await cli.post(GA_TOKEN_URL, json=data, headers=headers)
 
             if r.status_code != 200:
-                # Retourne un dictionnaire au lieu de crash, pour voir l'erreur dans /test-auth
                 return {"status": "Echec Atlantic", "code": r.status_code, "reponse": r.text}
                 
             return r.json()
@@ -57,13 +54,18 @@ class CozytouchClient:
     async def token(self):
         now = time.time()
         if (not self._oauth) or now >= self._jwt_exp - 60:
-            self._oauth = await self._oauth_token()
+            res = await self._oauth_token()
+            # Si on a reçu le dictionnaire d'erreur au lieu du token
+            if isinstance(res, dict) and "status" in res:
+                return res
+            self._oauth = res
             self._jwt = await self._jwt_token(self._oauth["access_token"])
             self._jwt_exp = now + int(self._oauth.get("expires_in", 3600))
         return self._jwt
 
     async def _ga(self, method, url, **kw):
         jwt = await self.token()
+        if isinstance(jwt, dict): return jwt # Propager l'erreur
         headers = kw.pop("headers", {})
         headers["Authorization"] = f"Bearer {jwt}"
         headers["User-Agent"] = UA_COZYTOUCH
@@ -75,7 +77,6 @@ class CozytouchClient:
             return r.text
 
     async def get_setup(self):
-        # On essaie les différentes versions de l'API Setup
         for path in [
             "https://apis.groupe-atlantic.com/magellan/setup",
             "https://apis.groupe-atlantic.com/magellan/v4/setup",
@@ -115,14 +116,3 @@ class CozytouchClient:
             n = s.get("name") or s.get("key")
             out[n] = s.get("value")
         return out
-
-
-
-
-
-
-
-
-
-
-
