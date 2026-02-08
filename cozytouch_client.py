@@ -8,7 +8,9 @@ GA_BASIC_AUTH = "Basic Q3RfMUpWeVRtSUxYOEllZkE3YVVOQmpGblpVYToyRWNORHpfZHkzNDJVS
 
 class CozytouchClient:
     def __init__(self, user, passwd, timeout=20.0):
-        self.user = user, self.passwd = passwd, self.timeout = timeout
+        self.user = user
+        self.passwd = passwd
+        self.timeout = timeout
         self._oauth, self._jwt, self._jwt_exp = None, None, 0
 
     async def _oauth_token(self):
@@ -91,5 +93,6 @@ class CozytouchClient:
         for s in arr:
             n = s.get("name") or s.get("key"); out[n] = s.get("value")
         return out
+
 
 
