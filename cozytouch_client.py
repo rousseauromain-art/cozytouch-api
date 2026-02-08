@@ -20,8 +20,8 @@ class CozytouchClient:
         async with httpx.AsyncClient(timeout=self.timeout) as cli:
             data = {
                 "grant_type": "password",
-                "username": "GA-PRIVATEPERSON/rousseau.romain@gmail.com",
-                "password": "Cozyius8nei9235!"
+                "username": f"GA-PRIVATEPERSON/{self.user}",
+                "password": self.passwd
             }
             headers = {
                 "Authorization": GA_BASIC_AUTH,
@@ -59,3 +59,4 @@ class CozytouchClient:
             self._oauth = res
             self._jwt = await self._jwt_token(self._oauth["access_token"])
             self._jwt_exp =
+
