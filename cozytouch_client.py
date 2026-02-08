@@ -41,7 +41,16 @@ class CozytouchClient:
         async with httpx.AsyncClient(timeout=self.timeout) as cli:
             r = await cli.get(GA_JWT_URL, headers=headers)
             r.raise_for_status()
-            return r.json().get("token") if "application/json" in r.headers.get("content-type", "") else r.text
+            
+            # Sécurité : on vérifie si c'est du JSON avant de faire .get()
+            try:
+                data = r.json()
+                if isinstance(data, dict):
+                    return data.get("token", r.text)
+                return r.text
+            except Exception:
+                # Si ce n'est pas du JSON (simple texte), on renvoie le texte brut
+                return r.text
 
     async def token(self):
         now = time.time()
@@ -107,3 +116,4 @@ class CozytouchClient:
         for s in (dev.get("states") or []):
             out[s.get("name")] = s.get("value")
         return out
+
