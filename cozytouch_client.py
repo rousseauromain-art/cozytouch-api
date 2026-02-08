@@ -9,16 +9,27 @@ class CozytouchClient:
         self.cookies = None
 
     async def login(self):
-        """Authentification par formulaire pour obtenir le JSESSIONID"""
-        url = f"{self.base_url}/login"
-        payload = {
-            "userId": self.user,
-            "userPassword": self.passwd
-        }
+        """Authentification Overkiz avec gestion de session vide préalable"""
         headers = {
-            "Content-Type": "application/x-www-form-urlencoded",
-            "User-Agent": "Cozytouch/4.3.0"
+            "User-Agent": "Cozytouch/4.3.0",
+            "Content-Type": "application/x-www-form-urlencoded"
         }
+        
+        async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as cli:
+            # Étape 1 : On va sur le login juste pour récupérer un cookie de session vide
+            await cli.get(f"{self.base_url}/login", headers=headers)
+            
+            # Étape 2 : On envoie les vrais identifiants
+            payload = {"userId": self.user, "userPassword": self.passwd}
+            res = await cli.post(f"{self.base_url}/login", data=payload, headers=headers)
+            
+            if res.status_code == 200:
+                self.cookies = res.cookies
+                return True
+            else:
+                # Debug : On veut savoir ce que dit le serveur
+                print(f"Erreur login : {res.status_code} - {res.text}")
+                return False
 
         async with httpx.AsyncClient(timeout=15.0) as cli:
             res = await cli.post(url, data=payload, headers=headers)
@@ -59,3 +70,4 @@ class CozytouchClient:
         async with httpx.AsyncClient(timeout=15.0) as cli:
             res = await cli.post(url, json=payload, cookies=self.cookies)
             return res.status_code
+
