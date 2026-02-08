@@ -1,132 +1,61 @@
-import os, time, httpx
-
-GA_TOKEN_URL = "https://apis.groupe-atlantic.com/token"
-GA_JWT_URL   = "https://apis.groupe-atlantic.com/magellan/accounts/jwt"
-GA_BASIC_AUTH = "Basic Q3RfMUpWeVRtSUxYOEllZkE3YVVOQmpGblpVYToyRWNORHpfZHkzNDJVSnFvMlo3cFNKTnZVdjBh"
-UA_COZYTOUCH = "Cozytouch/2.10.0 (iPhone; iOS 15.0; Scale/3.00)"
-
 import httpx
 
 class CozytouchClient:
     def __init__(self, user, passwd):
         self.user = user
         self.passwd = passwd
+        # URL spécifique identifiée dans tes tests Overkiz
         self.base_url = "https://ha101-1.overkiz.com/enduser-mobile-web/enduserapi"
-        self.client = httpx.AsyncClient(timeout=30.0)
+        self.cookies = None
 
     async def login(self):
-        """Authentification spécifique pour Bridge V2 / Overkiz"""
+        """Authentification par formulaire pour obtenir le JSESSIONID"""
         url = f"{self.base_url}/login"
-        data = {"userId": self.user, "userPassword": self.passwd}
-        # On envoie les identifiants en format formulaire
-        res = await self.client.post(url, data=data)
-        if res.status_code != 200:
-            return {"error": "Échec login Overkiz", "code": res.status_code}
-        return res.cookies # Le login Overkiz fonctionne par cookie de session
+        payload = {
+            "userId": self.user,
+            "userPassword": self.passwd
+        }
+        headers = {
+            "Content-Type": "application/x-www-form-urlencoded",
+            "User-Agent": "Cozytouch/4.3.0"
+        }
+
+        async with httpx.AsyncClient(timeout=15.0) as cli:
+            res = await cli.post(url, data=payload, headers=headers)
+            if res.status_code == 200:
+                self.cookies = res.cookies
+                return True
+            return False
 
     async def get_setup(self):
-        """Récupère enfin tes ONIRIS et ADELIS"""
-        cookies = await self.login()
-        if isinstance(cookies, dict) and "error" in cookies:
-            return cookies
-            
+        """Récupère la liste complète des appareils (Oniris, Adelis, etc.)"""
+        if not self.cookies:
+            await self.login()
+        
         url = f"{self.base_url}/setup"
-        r = await self.client.get(url, cookies=cookies)
-        try:
-            return r.json()
-        except:
-            return {"error": "Réponse non JSON", "body": r.text}
+        async with httpx.AsyncClient(timeout=15.0) as cli:
+            res = await cli.get(url, cookies=self.cookies)
+            if res.status_code == 200:
+                return res.json()
+            return {"error": "Impossible de récupérer le setup", "code": res.status_code}
 
-    async def _oauth_token(self):
-        async with httpx.AsyncClient(timeout=self.timeout) as cli:
-            data = {
-                "grant_type": "password",
-                "username": f"GA-PRIVATEPERSON/{self.user}",
-                "password": self.passwd
-            }
-            headers = {
-                "Authorization": GA_BASIC_AUTH,
-                "Content-Type": "application/x-www-form-urlencoded",
-                "User-Agent": UA_COZYTOUCH
-            }
-            try:
-                r = await cli.post(GA_TOKEN_URL, data=data, headers=headers)
-                if r.status_code != 200:
-                    return {"error": "Auth Failed", "code": r.status_code, "body": r.text}
-                return r.json()
-            except Exception as e:
-                return {"error": "Connection Error", "detail": str(e)}
-
-    async def _jwt_token(self, access_token: str):
-        headers = {
-            "Authorization": f"Bearer {access_token}",
-            "User-Agent": UA_COZYTOUCH
+    async def send_command(self, device_url, commands):
+        """Envoie une commande spécifique à un appareil"""
+        if not self.cookies:
+            await self.login()
+            
+        url = f"{self.base_url}/exec/apply"
+        # Structure de données spécifique à l'API Overkiz
+        payload = {
+            "label": "Action via API Koyeb",
+            "actions": [
+                {
+                    "deviceURL": device_url,
+                    "commands": commands
+                }
+            ]
         }
-        async with httpx.AsyncClient(timeout=self.timeout) as cli:
-            r = await cli.get(GA_JWT_URL, headers=headers)
-            r.raise_for_status()
-            
-            # Sécurité : on vérifie si c'est du JSON avant de faire .get()
-            try:
-                data = r.json()
-                if isinstance(data, dict):
-                    return data.get("token", r.text)
-                return r.text
-            except Exception:
-                # Si ce n'est pas du JSON (simple texte), on renvoie le texte brut
-                return r.text
-
-    async def token(self):
-        now = time.time()
-        # Si pas de token ou expire dans moins de 60s, on renouvelle
-        if (not self._oauth) or now >= self._jwt_exp - 60:
-            res = await self._oauth_token()
-            if isinstance(res, dict) and "error" in res:
-                return res
-            self._oauth = res
-            self._jwt = await self._jwt_token(self._oauth["access_token"])
-            self._jwt_exp = now + int(self._oauth.get("expires_in", 3600))
-        return self._jwt
-
-    async def _ga(self, method, url, data=None):
-        # On utilise une session pour garder les cookies (JSESSIONID)
-        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as cli:
-            if "login" not in url:
-                # On récupère les cookies de session avant l'appel
-                cookies = await self.login() 
-                res = await cli.request(method, url, data=data, cookies=cookies)
-            else:
-                res = await cli.request(method, url, data=data)
-            
-            return res.json()
-    
-    async def send_commands(self, device_url: str, commands: list[dict]):
-        payload = {"label":"API-Control","actions":[{"deviceURL":device_url,"commands":commands}]}
-        return await self._ga("POST", "https://apis.groupe-atlantic.com/magellan/exec/apply", json=payload)
-
-    @staticmethod
-    def iter_devices(setup: dict):
-        if not isinstance(setup, dict): return
-        if "devices" in setup: yield from setup["devices"]
-        else:
-            for p in setup.get("places", []):
-                for d in p.get("devices", []): yield d
-
-    @staticmethod
-    def is_radiator(dev: dict) -> bool:
-        text = (dev.get("uiClass","") + dev.get("widget","") + dev.get("controllableName",""))
-        return any(x in text for x in ["Heater", "Radiator", "Heating"])
-
-    @staticmethod
-    def states_map(dev: dict) -> dict:
-        out = {}
-        for s in (dev.get("states") or []):
-            out[s.get("name")] = s.get("value")
-        return out
-
-
-
-
-
-
-
+        
+        async with httpx.AsyncClient(timeout=15.0) as cli:
+            res = await cli.post(url, json=payload, cookies=self.cookies)
+            return res.status_code
