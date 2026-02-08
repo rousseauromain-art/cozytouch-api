@@ -77,15 +77,25 @@ class CozytouchClient:
             return r.text
 
     async def get_setup(self):
-        for path in [
+        paths = [
             "https://apis.groupe-atlantic.com/magellan/setup",
             "https://apis.groupe-atlantic.com/magellan/v4/setup",
             "https://apis.groupe-atlantic.com/magellan/registered/setup",
         ]:
-            try: return await self._ga("GET", path)
-            except Exception: continue
-        raise RuntimeError("Setup Cozytouch introuvable (API)")
-
+       #     try: return await self._ga("GET", path)
+       #     except Exception: continue
+       # raise RuntimeError("Setup Cozytouch introuvable (API)")      
+        last_error = ""
+        for path in paths:
+            try:
+                return await self._ga("GET", path)
+            except Exception as e:
+                last_error = str(e)
+                continue
+        
+        # Si on arrive ici, c'est qu'aucune URL ne marche
+        return {"error": "Toutes les URL Setup ont échoué", "derniere_erreur": last_error}    
+        
     async def send_commands(self, device_url: str, commands: list[dict]):
         payload = {"label":"Cozytouch API","actions":[{"deviceURL":device_url,"commands":commands}]}
         for path in [
@@ -116,3 +126,4 @@ class CozytouchClient:
             n = s.get("name") or s.get("key")
             out[n] = s.get("value")
         return out
+
