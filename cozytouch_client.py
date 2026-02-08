@@ -5,13 +5,37 @@ GA_JWT_URL   = "https://apis.groupe-atlantic.com/magellan/accounts/jwt"
 GA_BASIC_AUTH = "Basic Q3RfMUpWeVRtSUxYOEllZkE3YVVOQmpGblpVYToyRWNORHpfZHkzNDJVSnFvMlo3cFNKTnZVdjBh"
 UA_COZYTOUCH = "Cozytouch/2.10.0 (iPhone; iOS 15.0; Scale/3.00)"
 
+import httpx
+
 class CozytouchClient:
     def __init__(self, user, passwd):
         self.user = user
         self.passwd = passwd
-        # On change pour l'URL Overkiz dédiée à Atlantic
         self.base_url = "https://ha101-1.overkiz.com/enduser-mobile-web/enduserapi"
-        self.token_cache = None
+        self.client = httpx.AsyncClient(timeout=30.0)
+
+    async def login(self):
+        """Authentification spécifique pour Bridge V2 / Overkiz"""
+        url = f"{self.base_url}/login"
+        data = {"userId": self.user, "userPassword": self.passwd}
+        # On envoie les identifiants en format formulaire
+        res = await self.client.post(url, data=data)
+        if res.status_code != 200:
+            return {"error": "Échec login Overkiz", "code": res.status_code}
+        return res.cookies # Le login Overkiz fonctionne par cookie de session
+
+    async def get_setup(self):
+        """Récupère enfin tes ONIRIS et ADELIS"""
+        cookies = await self.login()
+        if isinstance(cookies, dict) and "error" in cookies:
+            return cookies
+            
+        url = f"{self.base_url}/setup"
+        r = await self.client.get(url, cookies=cookies)
+        try:
+            return r.json()
+        except:
+            return {"error": "Réponse non JSON", "body": r.text}
 
     async def _oauth_token(self):
         async with httpx.AsyncClient(timeout=self.timeout) as cli:
@@ -78,16 +102,6 @@ class CozytouchClient:
             if r.status_code >= 400:
                 return {"error": f"API Error {r.status_code}", "url": url, "body": r.text}
             return r.json() if "application/json" in r.headers.get("content-type", "") else r.text
-
-    async def get_setup(self):
-        # L'URL exacte pour les bridges Cozytouch V2
-        url = f"{self.base_url}/setup"
-        
-        async with httpx.AsyncClient() as cli:
-            token = await self.token()
-            headers = {"Authorization": f"Bearer {token}"}
-            r = await cli.get(url, headers=headers)
-            return r.json()
     
     async def send_commands(self, device_url: str, commands: list[dict]):
         payload = {"label":"API-Control","actions":[{"deviceURL":device_url,"commands":commands}]}
@@ -112,6 +126,7 @@ class CozytouchClient:
         for s in (dev.get("states") or []):
             out[s.get("name")] = s.get("value")
         return out
+
 
 
 
