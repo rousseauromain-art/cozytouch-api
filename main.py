@@ -2,57 +2,40 @@ import os
 from fastapi import FastAPI
 from cozytouch_client import CozytouchClient
 
-app = FastAPI(title="Cozytouch API - Production")
+app = FastAPI(title="Cozytouch API - Full House")
 
-# Initialisation du client
 client = CozytouchClient(
     user=os.getenv("CT_USER"),
     passwd=os.getenv("CT_PASS")
 )
 
-@app.get("/debug-vars")
-async def debug_vars():
-    """Vérifie que Koyeb transmet bien les accès"""
-    user = os.getenv("CT_USER")
-    return {
-        "user_detecte": user is not None,
-        "python_version": os.sys.version
-    }
-
-@app.get("/test-auth")
-async def test_auth():
-    """Affiche le token JWT (ton test réussi !)"""
-    return await client.token()
-
 @app.get("/radiators/discover")
 async def discover():
-    """Liste tous tes radiateurs et leurs URLs"""
+    """Utile pour vérifier ce que le script voit"""
     setup = await client.get_setup()
-    if isinstance(setup, dict) and "error" in setup:
-        return setup
+    return [d.get("label") for d in client.iter_devices(setup) if client.is_radiator(d)]
+
+@app.post("/away-all")
+async def set_away_all(temperature: float = 16.0):
+    """
+    Scénario : 16°C pour TOUS les radiateurs détectés.
+    Active le mode 'Away' qui sera visible sur l'application Cozytouch.
+    """
+    setup = await client.get_setup()
+    results = []
     
-    devices = []
+    # On boucle sur tous les appareils pour trouver les radiateurs
     for d in client.iter_devices(setup):
         if client.is_radiator(d):
-            states = client.states_map(d)
-            devices.append({
-                "nom": d.get("label"),
-                "url": d.get("deviceURL"),
-                "temperature_actuelle": states.get("core:TargetTemperatureState"),
-                "mode_actuel": states.get("core:OperatingModeState")
-            })
-    return devices
-
-@app.post("/radiators/away")
-async def set_away(device_url: str, temperature: float = 16.0):
-    """Active le mode absence à 16°C sans toucher au mode Confort"""
-    commands = [
-        {"name": "setDerogatedTargetTemperature", "parameters": [temperature]},
-        {"name": "setOperatingMode", "parameters": ["away"]}
-    ]
-    return await client.send_commands(device_url, commands)
-
-@app.post("/radiators/basic")
-async def set_basic(device_url: str):
-    """Repasse le radiateur en mode programmation/normal"""
-    return await client.send_commands(device_url, [{"name": "setOperatingMode", "parameters": ["basic"]}])
+            device_url = d.get("deviceURL")
+            name = d.get("label", "Inconnu")
+            
+            # Envoi de la commande de 16°C en mode Away
+            commands = [
+                {"name": "setDerogatedTargetTemperature", "parameters": [temperature]},
+                {"name": "setOperatingMode", "parameters": ["away"]}
+            ]
+            res = await client.send_commands(device_url, commands)
+            results.append({"radiateur": name, "status": "OK" if "error" not in str(res) else "Erreur"})
+            
+    return {"message": "Commande envoyée à toute la maison", "details": results}
