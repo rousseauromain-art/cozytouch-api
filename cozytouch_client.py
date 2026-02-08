@@ -15,20 +15,21 @@ class CozytouchClient:
         self.passwd = passwd
         self.timeout = timeout
         self._oauth, self._jwt, self._jwt_exp = None, None, 0
-
+        
     async def _oauth_token(self):
         async with httpx.AsyncClient(timeout=self.timeout) as cli:
-                    data = {
-                        "grant_type": "password",
-                        "username": "GA-PRIVATEPERSON/rousseau.romain@gmail.com",
-                        "password": "Cozyius8nei9235!"
-                    }
-                    headers = {
-                        "Authorization": GA_BASIC_AUTH,
-                        "Content-Type": "application/x-www-form-urlencoded",
-                        "User-Agent": UA_COZYTOUCH
-                    }
-            # Teste l'envoi en JSON au lieu de DATA
+            data = {
+                "grant_type": "password",
+                "username": "GA-PRIVATEPERSON/rousseau.romain@gmail.com",
+                "password": "Cozyius8nei9235!"
+            }
+            headers = {
+                "Authorization": GA_BASIC_AUTH,
+                "Content-Type": "application/x-www-form-urlencoded",
+                "User-Agent": UA_COZYTOUCH
+            }
+            
+            # Teste l'envoi en DATA
             r = await cli.post(GA_TOKEN_URL, data=data, headers=headers) 
             
             if r.status_code == 403:
@@ -36,7 +37,9 @@ class CozytouchClient:
                 r = await cli.post(GA_TOKEN_URL, json=data, headers=headers)
 
             if r.status_code != 200:
-                return {"status": "Echec Atlantic", "code": r.status_code, "reponse": r.text} #raise RuntimeError(f"Erreur {r.status_code}: {r.text}")
+                # Retourne un dictionnaire au lieu de crash, pour voir l'erreur dans /test-auth
+                return {"status": "Echec Atlantic", "code": r.status_code, "reponse": r.text}
+                
             return r.json()
 
     async def _jwt_token(self, access_token: str):
@@ -112,6 +115,7 @@ class CozytouchClient:
             n = s.get("name") or s.get("key")
             out[n] = s.get("value")
         return out
+
 
 
 
