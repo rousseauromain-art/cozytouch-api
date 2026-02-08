@@ -6,12 +6,12 @@ GA_BASIC_AUTH = "Basic Q3RfMUpWeVRtSUxYOEllZkE3YVVOQmpGblpVYToyRWNORHpfZHkzNDJVS
 UA_COZYTOUCH = "Cozytouch/2.10.0 (iPhone; iOS 15.0; Scale/3.00)"
 
 class CozytouchClient:
-    def __init__(self, user, passwd, timeout=20.0):
+    def __init__(self, user, passwd):
         self.user = user
         self.passwd = passwd
-        self.timeout = timeout
-        # On stocke les tokens en mémoire vive (RAM) au lieu de Redis
-        self._oauth, self._jwt, self._jwt_exp = None, None, 0
+        # On change pour l'URL Overkiz dédiée à Atlantic
+        self.base_url = "https://ha101-1.overkiz.com/enduser-mobile-web/enduserapi"
+        self.token_cache = None
 
     async def _oauth_token(self):
         async with httpx.AsyncClient(timeout=self.timeout) as cli:
@@ -80,30 +80,14 @@ class CozytouchClient:
             return r.json() if "application/json" in r.headers.get("content-type", "") else r.text
 
     async def get_setup(self):
-        url = "https://apis.groupe-atlantic.com/magellan/v1/setup"
+        # L'URL exacte pour les bridges Cozytouch V2
+        url = f"{self.base_url}/setup"
         
-        # On utilise un client qui gère les cookies automatiquement
-        async with httpx.AsyncClient(timeout=self.timeout, follow_redirects=True) as cli:
-            # 1. On récupère le token
+        async with httpx.AsyncClient() as cli:
             token = await self.token()
-            headers = {
-                "Authorization": f"Bearer {token}",
-                "User-Agent": "Cozytouch/4.3.0 (com.groupe-atlantic.cozytouch; build:1; iOS 16.0.0) Alamofire/5.4.3"
-            }
-            
-            # 2. On tente l'appel
+            headers = {"Authorization": f"Bearer {token}"}
             r = await cli.get(url, headers=headers)
-            
-            # Si le corps est vide ou [], on tente une version alternative
-            if r.status_code == 200 and (not r.text or r.text == "[]"):
-                # Plan B : On tente sans le 'v1' si la réponse était vide
-                alt_url = "https://apis.groupe-atlantic.com/magellan/setup"
-                r = await cli.get(alt_url, headers=headers)
-
-            try:
-                return r.json()
-            except:
-                return {"error": "Réponse non JSON", "body": r.text, "code": r.status_code}
+            return r.json()
     
     async def send_commands(self, device_url: str, commands: list[dict]):
         payload = {"label":"API-Control","actions":[{"deviceURL":device_url,"commands":commands}]}
@@ -128,6 +112,7 @@ class CozytouchClient:
         for s in (dev.get("states") or []):
             out[s.get("name")] = s.get("value")
         return out
+
 
 
 
