@@ -8,20 +8,19 @@ class CozytouchClient:
         self.cookies = None
 
     async def login(self):
-        """Reproduit le 'Flow' d'authentification vu dans Chrome"""
         headers = {
-            "User-Agent": "Cozytouch/4.3.0 (Android; 13)",
+            "User-Agent": "Cozytouch/4.3.0 (iPhone; iOS 16.0; Scale/3.00)",
             "Content-Type": "application/x-www-form-urlencoded",
-            "Accept": "application/json, text/plain, */*"
+            "Accept": "application/json"
         }
         
-        # On utilise un client qui garde les cookies automatiquement pendant la session de login
+        # L'ASTUCE : Utiliser un seul client pour TOUTE la phase de login
         async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as cli:
             try:
-                # ÉTAPE 1 : Le GET initial pour ouvrir le 'Flow' (récupère le cookie JSESSIONID)
+                # 1. On ouvre le "Flow" (le serveur nous donne un cookie JSESSIONID)
                 await cli.get(f"{self.base_url}/login", headers=headers)
                 
-                # ÉTAPE 2 : Le POST avec les identifiants
+                # 2. On envoie les identifiants (le client cli renvoie automatiquement le cookie reçu à l'étape 1)
                 payload = {
                     "userId": self.user,
                     "userPassword": self.passwd
@@ -29,13 +28,13 @@ class CozytouchClient:
                 res = await cli.post(f"{self.base_url}/login", data=payload, headers=headers)
                 
                 if res.status_code == 200:
-                    # On stocke les cookies de la réponse finale (ceux qui contiennent la session valide)
+                    # On sauvegarde les cookies pour les futurs appels (setup, etc.)
                     self.cookies = res.cookies
-                    return True, "Authentification réussie"
+                    return True, "Success"
                 
-                return False, f"Échec Login: {res.status_code}"
+                return False, f"Erreur {res.status_code}"
             except Exception as e:
-                return False, f"Erreur réseau: {str(e)}"
+                return False, str(e)
 
     async def get_setup(self):
         if not self.cookies:
@@ -43,15 +42,15 @@ class CozytouchClient:
             if not success: return {"error": msg}
         
         async with httpx.AsyncClient(timeout=30.0) as cli:
-            # On passe les cookies récupérés à l'étape 2
             res = await cli.get(f"{self.base_url}/setup", cookies=self.cookies)
             if res.status_code == 200:
                 return res.json()
-            return {"error": f"Setup Error {res.status_code}"}
+            return {"error": f"Setup code {res.status_code}"}
 
     async def send_command(self, device_url, commands):
         if not self.cookies: await self.login()
-        payload = {"label": "Koyeb_Action", "actions": [{"deviceURL": device_url, "commands": commands}]}
+        url = f"{self.base_url}/exec/apply"
+        payload = {"label": "Action", "actions": [{"deviceURL": device_url, "commands": commands}]}
         async with httpx.AsyncClient(timeout=30.0) as cli:
-            res = await cli.post(f"{self.base_url}/exec/apply", json=payload, cookies=self.cookies)
+            res = await cli.post(url, json=payload, cookies=self.cookies)
             return res.status_code
