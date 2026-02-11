@@ -3,8 +3,10 @@ import asyncio
 from pyoverkiz.client import OverkizClient
 from pyoverkiz.const import SUPPORTED_SERVERS
 from pyoverkiz.enums import Server
+from pyoverkiz.models import Command
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+
 
 # --- CONFIGURATION ---
 OVERKIZ_EMAIL = os.getenv("OVERKIZ_USER")
@@ -39,35 +41,39 @@ async def get_devices_listing():
                 
         return "\n".join(listing) if listing else "Aucun appareil pilotable trouvé."
 
+from pyoverkiz.models import Command  # <--- AJOUTE CET IMPORT
+
 async def apply_heating_mode(target_mode):
     async with OverkizClient(OVERKIZ_EMAIL, OVERKIZ_PASSWORD, server=SERVER) as client:
         await client.login()
         devices = await client.get_devices()
         
         results = []
+        print(f"--- DÉBUT DE LA COMMANDE : {target_mode} ---")
+        
         for device in devices:
-            cmds = [c.command_name for c in device.definition.commands]
+            cmds_list = [c.command_name for c in device.definition.commands]
             
-            # Pour tes radiateurs ONIRIS
-            if "setHolidays" in cmds:
+            # Pour les radiateurs ONIRIS
+            if "setHolidays" in cmds_list:
                 if target_mode == "ABSENCE":
-                    # On envoie les commandes séparément sans crochets
-                    await client.execute_command(device.device_url, "setHolidaysTargetTemperature", 10.0)
-                    await client.execute_command(device.device_url, "setHolidays", "on")
+                    print(f"[LOG] Envoi Hors-Gel 10.0 et ON vers {device.label}")
+                    await client.execute_command(device.device_url, Command("setHolidaysTargetTemperature", [10.0]))
+                    await client.execute_command(device.device_url, Command("setHolidays", ["on"]))
                     results.append(f"❄️ {device.label} -> 10°C")
                 else:
-                    await client.execute_command(device.device_url, "setHolidays", "off")
+                    print(f"[LOG] Envoi OFF vers {device.label}")
+                    await client.execute_command(device.device_url, Command("setHolidays", ["off"]))
                     results.append(f"🏠 {device.label} -> Planning")
             
-            # Pour ton sèche-serviette ADELIS (I2G_Actuator)
-            elif "setOperatingMode" in cmds:
-                # Tes logs montrent 'internal' pour le mode normal
+            # Pour le sèche-serviette ADELIS (I2G_Actuator)
+            elif "setOperatingMode" in cmds_list:
                 mode = "away" if target_mode == "ABSENCE" else "internal"
-                await client.execute_command(device.device_url, "setOperatingMode", mode)
+                print(f"[LOG] Envoi Mode {mode} vers {device.label}")
+                await client.execute_command(device.device_url, Command("setOperatingMode", [mode]))
                 results.append(f"🧼 {device.label} -> {mode}")
                 
-        return "\n".join(results)
-                
+        print("--- FIN DE LA COMMANDE ---")
         return "\n".join(results)
 
 # --- 2. COMMANDES DU BOT ---
