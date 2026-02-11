@@ -8,7 +8,7 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Cont
 
 # --- CONFIGURATION ---
 # Sur Koyeb, remplis ces variables dans l'interface "Environment Variables"
-OVERKIZ_EMAIL = "rousseau.romain@gmail.com"
+OVERKIZ_EMAIL = os.getenv("OVERKIZ_USER")
 OVERKIZ_PASSWORD = os.getenv("OVERKIZ_PASSWORD") # Ton mdp Cozytouch
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")     # Ton token de @BotFather
 SERVER = SUPPORTED_SERVERS[Server.ATLANTIC_COZYTOUCH]
