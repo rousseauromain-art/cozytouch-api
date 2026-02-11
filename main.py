@@ -48,23 +48,25 @@ async def apply_heating_mode(target_mode):
         for device in devices:
             cmds = [c.command_name for c in device.definition.commands]
             
-            # Correction pour les Radiateurs (ONIRIS)
+            # Pour tes radiateurs ONIRIS
             if "setHolidays" in cmds:
                 if target_mode == "ABSENCE":
-                    # On envoie les paramètres sous forme de LISTE [valeur]
-                    await client.execute_command(device.device_url, "setHolidaysTargetTemperature", [10.0])
-                    await client.execute_command(device.device_url, "setHolidays", ["on"])
+                    # On envoie les commandes séparément sans crochets
+                    await client.execute_command(device.device_url, "setHolidaysTargetTemperature", 10.0)
+                    await client.execute_command(device.device_url, "setHolidays", "on")
                     results.append(f"❄️ {device.label} -> 10°C")
                 else:
-                    await client.execute_command(device.device_url, "setHolidays", ["off"])
+                    await client.execute_command(device.device_url, "setHolidays", "off")
                     results.append(f"🏠 {device.label} -> Planning")
             
-            # Correction pour le sèche-serviette (ADELIS / I2G_Actuator)
+            # Pour ton sèche-serviette ADELIS (I2G_Actuator)
             elif "setOperatingMode" in cmds:
-                # 'away' pour absence, 'internal' pour planning/maison
+                # Tes logs montrent 'internal' pour le mode normal
                 mode = "away" if target_mode == "ABSENCE" else "internal"
-                await client.execute_command(device.device_url, "setOperatingMode", [mode])
+                await client.execute_command(device.device_url, "setOperatingMode", mode)
                 results.append(f"🧼 {device.label} -> {mode}")
+                
+        return "\n".join(results)
                 
         return "\n".join(results)
 
