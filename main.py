@@ -34,12 +34,16 @@ async def apply_heating_mode(target_mode):
 
 # --- GESTION DU BOT (Inchangée) ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Correction ici : callback_data à la place de callback_query_data
     keyboard = [
-        [InlineKeyboardButton("❄️ Mode Absence (10°C)", callback_query_data="ABSENCE")],
-        [InlineKeyboardButton("🏠 Mode Maison (Planning)", callback_query_data="HOME")]
+        [InlineKeyboardButton("❄️ Mode Absence (10°C)", callback_data="ABSENCE")],
+        [InlineKeyboardButton("🏠 Mode Maison (Planning)", callback_data="HOME")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("Contrôle du chauffage Romain :\n(Utilise /liste pour tester)", reply_markup=reply_markup)
+    await update.message.reply_text(
+        "Contrôle du chauffage Romain :\n(Utilise /liste pour tester)", 
+        reply_markup=reply_markup
+    )
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -56,27 +60,30 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ==========================================================
 
 async def get_devices_listing():
-    """Fonction de test pour lister les équipements sans action"""
+    """Version améliorée pour trouver le sèche-serviette"""
     async with OverkizClient(OVERKIZ_EMAIL, OVERKIZ_PASSWORD, server=SERVER) as client:
         await client.login()
         devices = await client.get_devices()
         listing = []
         for d in devices:
+            # On ignore le bridge Cozytouch
+            if d.ui_usage == "CentralControlUnit" or "pod" in d.device_url:
+                continue
+            # À insérer dans la boucle for d in devices
+            if "Towel" in d.definition.ui_widget or "Adelis" in d.label:
+                listing.append(f"🧼 SÈCHE-SERVIETTE TROUVÉ : {d.label}")
+                
             cmds = [c.command_name for c in d.definition.commands] if d.definition else []
+            
             if "setHolidays" in cmds:
                 listing.append(f"🌡️ RADIATEUR : {d.label}")
-            elif "setOperatingMode" in cmds and "pod" not in d.device_url:
-                listing.append(f"🧼 SÈCHE-SERVIETTE : {d.label}")
+            # On cherche tout ce qui ressemble à un sèche-serviette ou un radiateur sans holidays
+            elif any("Towel" in c or "OperatingMode" in c for c in cmds):
+                listing.append(f"🧼 APPAREIL DÉTECTÉ (Sèche-serviette ?) : {d.label}")
+                # Optionnel : décommente la ligne suivante pour voir ses commandes dans les logs
+                print(f"DEBUG: {d.label} possède les commandes: {cmds}")
+                
         return "\n".join(listing) if listing else "Aucun appareil trouvé."
-
-async def liste(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Commande /liste pour tester la visibilité des équipements"""
-    await update.message.reply_text("🔍 Recherche de tes équipements...")
-    try:
-        res = await get_devices_listing()
-        await update.message.reply_text(f"Équipements détectés :\n\n{res}")
-    except Exception as e:
-        await update.message.reply_text(f"❌ Erreur listing : {e}")
 
 if __name__ == "__main__":
     app = Application.builder().token(TELEGRAM_TOKEN).build()
