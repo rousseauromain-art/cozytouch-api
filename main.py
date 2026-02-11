@@ -6,46 +6,75 @@ from pyoverkiz.enums import Server
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
-# --- CONFIGURATION (Inchangée) ---
+# --- CONFIGURATION ---
 OVERKIZ_EMAIL = os.getenv("OVERKIZ_USER")
 OVERKIZ_PASSWORD = os.getenv("OVERKIZ_PASSWORD")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 SERVER = SUPPORTED_SERVERS[Server.ATLANTIC_COZYTOUCH]
 
-# --- FONCTIONS COZYTOUCH (Inchangées) ---
+# --- 1. FONCTIONS DE RÉCUPÉRATION / ACTION ---
+
+async def get_devices_listing():
+    """Liste les équipements pour test"""
+    async with OverkizClient(OVERKIZ_EMAIL, OVERKIZ_PASSWORD, server=SERVER) as client:
+        await client.login()
+        devices = await client.get_devices()
+        listing = []
+        for d in devices:
+            if d.ui_usage == "CentralControlUnit" or "pod" in d.device_url:
+                continue
+            cmds = [c.command_name for c in d.definition.commands] if d.definition else []
+            if "setHolidays" in cmds:
+                listing.append(f"🌡️ RADIATEUR : {d.label}")
+            elif any("Towel" in c or "OperatingMode" in c for c in cmds) or "Adelis" in d.label:
+                listing.append(f"🧼 SÈCHE-SERVIETTE : {d.label}")
+        return "\n".join(listing) if listing else "Aucun appareil trouvé."
+
 async def apply_heating_mode(target_mode):
+    """Applique le mode choisi"""
     async with OverkizClient(OVERKIZ_EMAIL, OVERKIZ_PASSWORD, server=SERVER) as client:
         await client.login()
         devices = await client.get_devices()
         results = []
         for device in devices:
-            if "setHolidays" in [c.command_name for c in device.definition.commands]:
+            cmds = [c.command_name for c in device.definition.commands] if device.definition else []
+            # Radiateurs Oniris
+            if "setHolidays" in cmds:
                 if target_mode == "ABSENCE":
                     await client.execute_command(device.device_url, "setHolidaysTargetTemperature", 10.0)
                     await client.execute_command(device.device_url, "setHolidays", "holidays")
                 else:
                     await client.execute_command(device.device_url, "setHolidays", "home")
                 results.append(f"✅ {device.label} mis à jour")
-            elif "setOperatingMode" in [c.command_name for c in device.definition.commands]:
+            # Sèche-serviette Adelis
+            elif "setOperatingMode" in cmds:
                 mode = "away" if target_mode == "ABSENCE" else "internal"
                 await client.execute_command(device.device_url, "setOperatingMode", mode)
                 results.append(f"✅ {device.label} ({mode})")
         return "\n".join(results)
 
-# --- GESTION DU BOT (Inchangée) ---
+# --- 2. COMMANDES DU BOT ---
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Correction ici : callback_data à la place de callback_query_data
+    """Répond au /start"""
     keyboard = [
         [InlineKeyboardButton("❄️ Mode Absence (10°C)", callback_data="ABSENCE")],
         [InlineKeyboardButton("🏠 Mode Maison (Planning)", callback_data="HOME")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text(
-        "Contrôle du chauffage Romain :\n(Utilise /liste pour tester)", 
-        reply_markup=reply_markup
-    )
+    await update.message.reply_text("Contrôle du chauffage Romain :\n(Utilise /liste pour tester)", reply_markup=reply_markup)
+
+async def liste_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Répond au /liste"""
+    await update.message.reply_text("🔍 Recherche de tes équipements...")
+    try:
+        res = await get_devices_listing()
+        await update.message.reply_text(f"Équipements détectés :\n\n{res}")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Erreur : {e}")
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Gère les clics sur les boutons"""
     query = update.callback_query
     await query.answer()
     await query.edit_message_text(text=f"🔄 Application du mode {query.data}...")
@@ -55,40 +84,15 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await query.edit_message_text(text=f"❌ Erreur : {e}")
 
-# ==========================================================
-# NOUVELLES FONCTIONS (Ajoutées à la fin pour le suivi)
-# ==========================================================
-
-async def get_devices_listing():
-    """Version améliorée pour trouver le sèche-serviette"""
-    async with OverkizClient(OVERKIZ_EMAIL, OVERKIZ_PASSWORD, server=SERVER) as client:
-        await client.login()
-        devices = await client.get_devices()
-        listing = []
-        for d in devices:
-            # On ignore le bridge Cozytouch
-            if d.ui_usage == "CentralControlUnit" or "pod" in d.device_url:
-                continue
-            # À insérer dans la boucle for d in devices
-            if "Towel" in d.definition.ui_widget or "Adelis" in d.label:
-                listing.append(f"🧼 SÈCHE-SERVIETTE TROUVÉ : {d.label}")
-                
-            cmds = [c.command_name for c in d.definition.commands] if d.definition else []
-            
-            if "setHolidays" in cmds:
-                listing.append(f"🌡️ RADIATEUR : {d.label}")
-            # On cherche tout ce qui ressemble à un sèche-serviette ou un radiateur sans holidays
-            elif any("Towel" in c or "OperatingMode" in c for c in cmds):
-                listing.append(f"🧼 APPAREIL DÉTECTÉ (Sèche-serviette ?) : {d.label}")
-                # Optionnel : décommente la ligne suivante pour voir ses commandes dans les logs
-                print(f"DEBUG: {d.label} possède les commandes: {cmds}")
-                
-        return "\n".join(listing) if listing else "Aucun appareil trouvé."
+# --- 3. LANCEMENT ---
 
 if __name__ == "__main__":
     app = Application.builder().token(TELEGRAM_TOKEN).build()
+    
+    # On enregistre les handlers après avoir défini les fonctions
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("liste", liste)) # Nouvelle commande
+    app.add_handler(CommandHandler("liste", liste_cmd))
     app.add_handler(CallbackQueryHandler(button_handler))
+    
     print("Bot démarré...")
-    app.run_polling() # Cette ligne maintient le bot en vie
+    app.run_polling()
