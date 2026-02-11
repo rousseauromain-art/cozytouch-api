@@ -40,26 +40,32 @@ async def get_devices_listing():
         return "\n".join(listing) if listing else "Aucun appareil pilotable trouvé."
 
 async def apply_heating_mode(target_mode):
-    """Applique le mode choisi"""
     async with OverkizClient(OVERKIZ_EMAIL, OVERKIZ_PASSWORD, server=SERVER) as client:
         await client.login()
         devices = await client.get_devices()
+        
         results = []
         for device in devices:
-            cmds = [c.command_name for c in device.definition.commands] if device.definition else []
-            # Radiateurs Oniris
+            cmds = [c.command_name for c in device.definition.commands]
+            
+            # Correction pour les Radiateurs (ONIRIS)
             if "setHolidays" in cmds:
                 if target_mode == "ABSENCE":
-                    await client.execute_command(device.device_url, "setHolidaysTargetTemperature", 10.0)
-                    await client.execute_command(device.device_url, "setHolidays", "holidays")
+                    # On envoie les paramètres sous forme de LISTE [valeur]
+                    await client.execute_command(device.device_url, "setHolidaysTargetTemperature", [10.0])
+                    await client.execute_command(device.device_url, "setHolidays", ["on"])
+                    results.append(f"❄️ {device.label} -> 10°C")
                 else:
-                    await client.execute_command(device.device_url, "setHolidays", "home")
-                results.append(f"✅ {device.label} mis à jour")
-            # Sèche-serviette Adelis
+                    await client.execute_command(device.device_url, "setHolidays", ["off"])
+                    results.append(f"🏠 {device.label} -> Planning")
+            
+            # Correction pour le sèche-serviette (ADELIS / I2G_Actuator)
             elif "setOperatingMode" in cmds:
+                # 'away' pour absence, 'internal' pour planning/maison
                 mode = "away" if target_mode == "ABSENCE" else "internal"
-                await client.execute_command(device.device_url, "setOperatingMode", mode)
-                results.append(f"✅ {device.label} ({mode})")
+                await client.execute_command(device.device_url, "setOperatingMode", [mode])
+                results.append(f"🧼 {device.label} -> {mode}")
+                
         return "\n".join(results)
 
 # --- 2. COMMANDES DU BOT ---
