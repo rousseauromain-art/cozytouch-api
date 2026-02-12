@@ -94,4 +94,17 @@ async def main():
     await app.run_polling()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    import nest_asyncio
+    import asyncio
+    
+    # On essaie de récupérer la boucle existante, sinon on en crée une
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+    try:
+        loop.run_until_complete(main())
+    except KeyboardInterrupt:
+        pass
