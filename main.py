@@ -14,6 +14,16 @@ OVERKIZ_PASSWORD = os.getenv("OVERKIZ_PASSWORD")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 SERVER = SUPPORTED_SERVERS[Server.ATLANTIC_COZYTOUCH]
 
+async def liste(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🔎 Recherche de tes équipements...")
+    async with OverkizClient(OVERKIZ_EMAIL, OVERKIZ_PASSWORD, server=SERVER) as client:
+        await client.login()
+        devices = await client.get_devices()
+        msg = "Équipements détectés :\n"
+        for d in devices:
+            msg += f"\n📍 {d.label} ({d.ui_widget})"
+        await update.message.reply_text(msg)
+        
 async def apply_heating_mode(target_mode):
     start_time = datetime.now()
     results = []
