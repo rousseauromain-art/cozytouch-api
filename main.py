@@ -14,6 +14,62 @@ OVERKIZ_PASSWORD = os.getenv("OVERKIZ_PASSWORD")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 SERVER = SUPPORTED_SERVERS[Server.ATLANTIC_COZYTOUCH]
 
+import asyncio
+from pyoverkiz.client import OverkizClient
+from pyoverkiz.models import Command
+
+# ... (tes constantes OVERKIZ_EMAIL, etc.)
+
+async def apply_heating_mode(target_mode):
+    """Bascule les radiateurs entre le planning interne et le mode Absence global."""
+    async with OverkizClient(OVERKIZ_EMAIL, OVERKIZ_PASSWORD, server=SERVER) as client:
+        await client.login()
+        devices = await client.get_devices()
+        
+        results = []
+        for device in devices:
+            # On ne cible que les radiateurs (IO Heating System)
+            if device.ui_model == "HeatingSystem":
+                cmds = [c.command_name for c in device.definition.commands]
+                
+                if target_mode == "ABSENCE":
+                    # 1. On règle la température Hors-Gel (souvent 7-10°C)
+                    if "setHolidaysTargetTemperature" in cmds:
+                        await client.execute_command(device.device_url, Command("setHolidaysTargetTemperature", [16.0]))
+                    
+                    # 2. IMPORTANT : On bascule le mode de fonctionnement sur 'away'
+                    # C'est ce qui active le bandeau Absence dans l'app Cozytouch
+                    if "setOperatingMode" in cmds:
+                        await client.execute_command(device.device_url, Command("setOperatingMode", ["away"]))
+                    
+                    results.append(f"❄️ {device.label} : Mode ABSENCE (16°C) activé")
+
+                else:
+                    # Retour au mode normal (Planning interne)
+                    if "setOperatingMode" in cmds:
+                        await client.execute_command(device.device_url, Command("setOperatingMode", ["internal"]))
+                    
+                    results.append(f"🏠 {device.label} : Retour au mode PLANNING")
+        
+        # On lance un refresh automatique après les commandes
+        await refresh_cozytouch_states()
+        
+        return "\n".join(results)
+
+async def refresh_cozytouch_states():
+    """Force l'actualisation des données entre les serveurs et les radiateurs."""
+    async with OverkizClient(OVERKIZ_EMAIL, OVERKIZ_PASSWORD, server=SERVER) as client:
+        await client.login()
+        devices = await client.get_devices()
+        
+        for device in devices:
+            if "refreshStates" in [c.command_name for c in device.definition.commands]:
+                try:
+                    await client.execute_command(device.device_url, Command("refreshStates"))
+                except Exception:
+                    continue # Certains appareils sont parfois occupés
+        return "🔄 Actualisation demandée aux radiateurs."
+        
 async def liste(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🔎 Recherche de tes équipements...")
     async with OverkizClient(OVERKIZ_EMAIL, OVERKIZ_PASSWORD, server=SERVER) as client:
@@ -23,55 +79,6 @@ async def liste(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for d in devices:
             msg += f"\n📍 {d.label} ({d.widget})"
         await update.message.reply_text(msg)
-        
-async def apply_heating_mode(target_mode):
-    start_time = datetime.now()
-    results = []
-    
-    async with OverkizClient(OVERKIZ_EMAIL, OVERKIZ_PASSWORD, server=SERVER) as client:
-        await client.login()
-        devices = await client.get_devices()
-        
-        print(f"--- [{start_time.strftime('%H:%M:%S')}] DÉBUT DES COMMANDES ---")
-        
-        for device in devices:
-            cmds_list = [c.command_name for c in device.definition.commands]
-            dev_start = datetime.now()
-            
-            try:
-                # 1. Gestion des Radiateurs ONIRIS
-                if "setHolidays" in cmds_list:
-                    if target_mode == "ABSENCE":
-                        # On envoie d'abord la consigne de température, puis le mode
-                        await client.execute_command(device.device_url, Command("setHolidaysTargetTemperature", [10.0]))
-                        await client.execute_command(device.device_url, Command("setHolidays", ["on"]))
-                        status = "❄️ 10°C"
-                    else:
-                        await client.execute_command(device.device_url, Command("setHolidays", ["off"]))
-                        status = "🏠 Planning"
-                
-                # 2. Gestion du sèche-serviette ADELIS
-                elif "setOperatingMode" in cmds_list:
-                    mode = "away" if target_mode == "ABSENCE" else "internal"
-                    await client.execute_command(device.device_url, Command("setOperatingMode", [mode]))
-                    status = f"🧼 {mode}"
-                
-                else:
-                    continue # On passe les équipements non pilotables
-
-                elapsed = (datetime.now() - dev_start).total_seconds()
-                res_msg = f"{device.label} : {status} OK ({elapsed:.1f}s)"
-                print(f"[LOG] {res_msg}")
-                results.append(res_msg)
-
-            except Exception as e:
-                print(f"[ERR] {device.label} a échoué : {str(e)}")
-                results.append(f"❌ {device.label} : Erreur")
-
-        total_duration = (datetime.now() - start_time).total_seconds()
-        print(f"--- FIN (Durée totale: {total_duration:.1f}s) ---")
-        
-        return f"✅ **Terminé à {datetime.now().strftime('%H:%M:%S')}**\n⏱ Durée : {total_duration:.1f}s\n\n" + "\n".join(results)
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -85,7 +92,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
-        [InlineKeyboardButton("❄️ Mode Absence (10°C)", callback_data="ABSENCE")],
+        [InlineKeyboardButton("❄️ Mode Absence (16°C)", callback_data="ABSENCE")],
         [InlineKeyboardButton("🏠 Mode Maison (Planning)", callback_data="HOME")]
     ]
     await update.message.reply_text("Commande Chauffage Romain :", reply_markup=InlineKeyboardMarkup(keyboard))
