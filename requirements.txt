@@ -1,2 +1,3 @@
 pyoverkiz
 python-telegram-bot
+nest_asyncio
