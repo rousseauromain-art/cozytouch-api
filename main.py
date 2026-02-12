@@ -21,7 +21,7 @@ async def liste(update: Update, context: ContextTypes.DEFAULT_TYPE):
         devices = await client.get_devices()
         msg = "Équipements détectés :\n"
         for d in devices:
-            msg += f"\n📍 {d.label} ({d.ui_widget})"
+            msg += f"\n📍 {d.label} ({d.widget})"
         await update.message.reply_text(msg)
         
 async def apply_heating_mode(target_mode):
@@ -85,8 +85,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
-        [InlineKeyboardButton("❄️ Mode Absence (10°C)", callback_query_data="ABSENCE")],
-        [InlineKeyboardButton("🏠 Mode Maison (Planning)", callback_query_data="HOME")]
+        [InlineKeyboardButton("❄️ Mode Absence (10°C)", callback_data="ABSENCE")],
+        [InlineKeyboardButton("🏠 Mode Maison (Planning)", callback_data="HOME")]
     ]
     await update.message.reply_text("Commande Chauffage Romain :", reply_markup=InlineKeyboardMarkup(keyboard))
 
