@@ -81,30 +81,35 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Commande Chauffage Romain :", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def main():
-    # --- FORCE LOGOUT TELEGRAM ---
-    # Cette étape supprime tout "Webook" ou session pendante qui cause l'erreur Conflict
+    # 1. On configure l'application
     app = Application.builder().token(TELEGRAM_TOKEN).build()
+    
+    # 2. On nettoie les sessions (drop_pending_updates=True est crucial ici)
+    await app.initialize()
     await app.bot.delete_webhook(drop_pending_updates=True)
-    print("Log: Anciennes sessions Telegram nettoyées.")
-
+    await app.start()
+    
+    # 3. On ajoute les handlers
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("liste", liste)) # Si tu as gardé la fonction liste
     app.add_handler(CallbackQueryHandler(button_handler))
     
+    print("Log: Anciennes sessions Telegram nettoyées.")
     print("Bot démarré...")
-    await app.run_polling()
+    
+    # 4. On lance le polling de manière asynchrone pour ne pas bloquer la boucle
+    await app.updater.start_polling()
+    
+    # 5. On maintient le script en vie indéfiniment
+    try:
+        while True:
+            await asyncio.sleep(3600)
+    except (KeyboardInterrupt, SystemExit):
+        await app.stop()
 
 if __name__ == "__main__":
-    import nest_asyncio
-    import asyncio
-    
-    # On essaie de récupérer la boucle existante, sinon on en crée une
+    # Plus besoin de nest_asyncio ici, on utilise la méthode standard la plus robuste
     try:
-        loop = asyncio.get_event_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
-    try:
-        loop.run_until_complete(main())
-    except KeyboardInterrupt:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
         pass
