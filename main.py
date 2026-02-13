@@ -22,22 +22,28 @@ async def apply_heating_mode(target_mode):
         await client.login()
         devices = await client.get_devices()
         
-        diag_msg = ""
+        diag_msg = "🔍 **Résultat du Diagnostic**\n\n"
         for d in devices:
-            if "Radiateur" in d.label:
-                # On cherche la définition de la commande dans le dictionnaire de l'appareil
+            # On cible les radiateurs Oniris/Adelis via leur label
+            if "Radiateur" in d.label or "Oniris" in d.label:
+                # Récupération de la température actuelle (Refresh)
+                temp_state = d.states.get("core:TemperatureState")
+                current_temp = temp_temp_state.value if temp_state else "Inconnue"
+                
+                # Extraction de la définition de la commande
                 cmd_def = next((c for c in d.definition.commands if c.command_name == "setOperatingMode"), None)
                 
-                # On récupère aussi la température actuelle pour préparer le futur refresh
-                temp_state = d.states.get("core:TemperatureState")
-                current_temp = temp_state.value if temp_state else "Inconnue"
-
                 diag_msg += f"📡 **{d.label}**\n"
-                diag_msg += f"Temp actuelle: {current_temp}°C\n"
+                diag_msg += f"🌡 Temp actuelle : {current_temp}°C\n"
+                
                 if cmd_def:
-                    diag_msg += f"Format attendu: `{cmd_def.parameters}`\n\n"
+                    # On affiche le nombre d'arguments attendus
+                    diag_msg += f"🔢 Nb arguments : `{cmd_def.n_arg}`\n"
+                else:
+                    diag_msg += "❌ Commande `setOperatingMode` non trouvée.\n"
+                diag_msg += "---\n"
         
-        return diag_msg if diag_msg else "Aucun radiateur trouvé."
+        return diag_msg if diag_msg != "🔍 **Résultat du Diagnostic**\n\n" else "Aucun radiateur détecté."
 
 # --- COMMANDES TELEGRAM ---
 
