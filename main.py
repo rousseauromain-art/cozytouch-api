@@ -18,23 +18,34 @@ async def apply_heating_mode(target_mode):
         await client.login()
         devices = await client.get_devices()
         results = []
+        
         for d in devices:
+            # On vérifie si c'est un appareil de chauffage
             cmds = [c.command_name for c in d.definition.commands]
-            
-            if target_mode == "ABSENCE":
-                # On enlève les crochets [] autour de "away" et 10.0
-                if "setOperatingMode" in cmds:
-                    await client.execute_command(d.device_url, Command("setOperatingMode", "away"))
-                if "setHolidaysTargetTemperature" in cmds:
-                    await client.execute_command(d.device_url, Command("setHolidaysTargetTemperature", 16.0))
-                results.append(f"✅ {d.label} -> Absence")
-            else:
-                if "setOperatingMode" in cmds:
-                    # On repasse en mode interne (planning)
-                    await client.execute_command(d.device_url, Command("setOperatingMode", "internal"))
-                results.append(f"🏠 {d.label} -> Planning")
+            if "setOperatingMode" not in cmds and "setHolidays" not in cmds:
+                continue
+
+            try:
+                if target_mode == "ABSENCE":
+                    # SYNTAXE DIRECTE : pas d'objet Command, paramètres dans une LISTE []
+                    if "setOperatingMode" in cmds:
+                        await client.execute_command(d.device_url, "setOperatingMode", ["away"])
+                    
+                    if "setHolidaysTargetTemperature" in cmds:
+                        await client.execute_command(d.device_url, "setHolidaysTargetTemperature", [10.0])
+                    
+                    results.append(f"✅ {d.label} -> ABSENCE")
                 
-        return "\n".join(results) if results else "Aucun appareil trouvé."
+                else:
+                    if "setOperatingMode" in cmds:
+                        await client.execute_command(d.device_url, "setOperatingMode", ["internal"])
+                    
+                    results.append(f"🏠 {d.label} -> MAISON")
+            
+            except Exception as e:
+                results.append(f"❌ {d.label} erreur: {str(e)[:50]}")
+                
+        return "\n".join(results) if results else "Aucun radiateur détecté."
 
 async def refresh_logic():
     async with OverkizClient(OVERKIZ_EMAIL, OVERKIZ_PASSWORD, server=SERVER) as client:
