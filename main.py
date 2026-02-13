@@ -79,4 +79,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     """Lance le bot."""
     if not TOKEN:
-        print("Erreur : TELEGRAM_TOKEN manquant
+        print("Erreur : TELEGRAM_TOKEN manquant.")
+        return
+
+    print("Bot démarré...")
+    application = Application.builder().token(TOKEN).build()
+    
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CallbackQueryHandler(button_handler))
+    
+    application.run_polling()
+
+if __name__ == "__main__":
+    main()
