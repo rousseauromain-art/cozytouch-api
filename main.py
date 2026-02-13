@@ -11,7 +11,7 @@ from pyoverkiz.models import Command
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 OVERKIZ_EMAIL = os.getenv("OVERKIZ_EMAIL")
 OVERKIZ_PASSWORD = os.getenv("OVERKIZ_PASSWORD")
-SERVER = Server.FRANCE  # Pour Atlantic / Cozytouch
+SERVER = SUPPORTED_SERVERS[Server.ATLANTIC_COZYTOUCH]
 
 # Configuration des logs
 logging.basicConfig(level=logging.INFO)
