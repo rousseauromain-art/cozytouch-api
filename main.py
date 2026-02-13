@@ -18,38 +18,26 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 async def apply_heating_mode(target_mode):
-    """Applique le mode de chauffage aux radiateurs Oniris/Adelis."""
     async with OverkizClient(OVERKIZ_EMAIL, OVERKIZ_PASSWORD, server=SERVER) as client:
         await client.login()
         devices = await client.get_devices()
-        results = []
         
+        diag_output = []
         for d in devices:
-            # On récupère les commandes disponibles pour cet appareil
-            cmds = [c.command_name for c in d.definition.commands]
-            
-            # On filtre pour ne garder que les radiateurs compatibles
-            if "setOperatingMode" in cmds:
-                try:
-                    if target_mode == "ABSENCE":
-                        # 1. On règle la température hors-gel d'abord (évite l'erreur 'no value')
-                        if "setHolidaysTargetTemperature" in cmds:
-                            await client.execute_command(d.device_url, "setHolidaysTargetTemperature", [10.0])
-                        
-                        # 2. On active le mode absence 'away' (confirmé par ton YAML HA)
-                        await client.execute_command(d.device_url, "setOperatingMode", ["away"])
-                        results.append(f"✅ {d.label} : ❄️ Absence (10°C)")
-                    
-                    else:
-                        # Retour au mode Planning (Interne)
-                        await client.execute_command(d.device_url, "setOperatingMode", ["internal"])
-                        results.append(f"🏠 {d.label} : 📅 Planning (Auto)")
+            # On cherche uniquement tes radiateurs
+            if "setOperatingMode" in [c.command_name for c in d.definition.commands]:
+                # On récupère la définition de la commande pour cet appareil précis
+                cmd_def = next(c for c in d.definition.commands if c.command_name == "setOperatingMode")
                 
-                except Exception as e:
-                    logger.error(f"Erreur sur {d.label}: {e}")
-                    results.append(f"❌ {d.label} : Erreur format")
+                # On construit un message avec le nom du radiateur et ses besoins techniques
+                info = (
+                    f"📡 **{d.label}**\n"
+                    f"URL: `{d.device_url}`\n"
+                    f"Params attendus: `{cmd_def.parameters}`\n"
+                )
+                diag_output.append(info)
         
-        return "\n".join(results) if results else "Aucun appareil compatible trouvé."
+        return "\n".join(diag_output) if diag_output else "Aucun radiateur trouvé."
 
 # --- COMMANDES TELEGRAM ---
 
