@@ -46,9 +46,9 @@ async def refresh_logic():
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
-        [InlineKeyboardButton("❄️ Absence (10°C)", callback_query_data="ABSENCE")],
-        [InlineKeyboardButton("🏠 Maison (Planning)", callback_query_data="HOME")],
-        [InlineKeyboardButton("🔄 Rafraîchir l'état", callback_query_data="REFRESH")]
+        [InlineKeyboardButton("❄️ Absence (10°C)", callback_data="ABSENCE")],
+        [InlineKeyboardButton("🏠 Maison (Planning)", callback_data="HOME")],
+        [InlineKeyboardButton("🔄 Rafraîchir l'état", callback_data="REFRESH")]
     ]
     await update.message.reply_text("Pilotage Cozytouch :", reply_markup=InlineKeyboardMarkup(keyboard))
 
