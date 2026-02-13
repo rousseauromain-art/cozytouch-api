@@ -22,22 +22,22 @@ async def apply_heating_mode(target_mode):
         await client.login()
         devices = await client.get_devices()
         
-        diag_output = []
+        diag_msg = ""
         for d in devices:
-            # On cherche uniquement tes radiateurs
-            if "setOperatingMode" in [c.command_name for c in d.definition.commands]:
-                # On récupère la définition de la commande pour cet appareil précis
-                cmd_def = next(c for c in d.definition.commands if c.command_name == "setOperatingMode")
+            if "Radiateur" in d.label:
+                # On cherche la définition de la commande dans le dictionnaire de l'appareil
+                cmd_def = next((c for c in d.definition.commands if c.command_name == "setOperatingMode"), None)
                 
-                # On construit un message avec le nom du radiateur et ses besoins techniques
-                info = (
-                    f"📡 **{d.label}**\n"
-                    f"URL: `{d.device_url}`\n"
-                    f"Params attendus: `{cmd_def.parameters}`\n"
-                )
-                diag_output.append(info)
+                # On récupère aussi la température actuelle pour préparer le futur refresh
+                temp_state = d.states.get("core:TemperatureState")
+                current_temp = temp_state.value if temp_state else "Inconnue"
+
+                diag_msg += f"📡 **{d.label}**\n"
+                diag_msg += f"Temp actuelle: {current_temp}°C\n"
+                if cmd_def:
+                    diag_msg += f"Format attendu: `{cmd_def.parameters}`\n\n"
         
-        return "\n".join(diag_output) if diag_output else "Aucun radiateur trouvé."
+        return diag_msg if diag_msg else "Aucun radiateur trouvé."
 
 # --- COMMANDES TELEGRAM ---
 
