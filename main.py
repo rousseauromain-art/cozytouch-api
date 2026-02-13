@@ -4,7 +4,7 @@ import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from pyoverkiz.client import OverkizClient
-from pyoverkiz.const import Server
+from pyoverkiz.const import Server, SUPPORTED_SERVERS
 from pyoverkiz.models import Command
 
 # --- CONFIGURATION ---
