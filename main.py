@@ -18,20 +18,23 @@ async def apply_heating_mode(target_mode):
         await client.login()
         devices = await client.get_devices()
         results = []
-        for device in devices:
-            cmds = [c.command_name for c in device.definition.commands]
-            if "setHolidays" in cmds or "setOperatingMode" in cmds:
-                if target_mode == "ABSENCE":
-                    if "setHolidaysTargetTemperature" in cmds:
-                        await client.execute_command(device.device_url, Command("setHolidaysTargetTemperature", [10.0]))
-                    if "setOperatingMode" in cmds:
-                        await client.execute_command(device.device_url, Command("setOperatingMode", ["away"]))
-                    results.append(f"❄️ {device.label} -> Away")
-                else:
-                    if "setOperatingMode" in cmds:
-                        await client.execute_command(device.device_url, Command("setOperatingMode", ["internal"]))
-                    results.append(f"🏠 {device.label} -> Planning")
-        return "\n".join(results)
+        for d in devices:
+            cmds = [c.command_name for c in d.definition.commands]
+            
+            if target_mode == "ABSENCE":
+                # On enlève les crochets [] autour de "away" et 10.0
+                if "setOperatingMode" in cmds:
+                    await client.execute_command(d.device_url, Command("setOperatingMode", "away"))
+                if "setHolidaysTargetTemperature" in cmds:
+                    await client.execute_command(d.device_url, Command("setHolidaysTargetTemperature", 16.0))
+                results.append(f"✅ {d.label} -> Absence")
+            else:
+                if "setOperatingMode" in cmds:
+                    # On repasse en mode interne (planning)
+                    await client.execute_command(d.device_url, Command("setOperatingMode", "internal"))
+                results.append(f"🏠 {d.label} -> Planning")
+                
+        return "\n".join(results) if results else "Aucun appareil trouvé."
 
 async def refresh_logic():
     async with OverkizClient(OVERKIZ_EMAIL, OVERKIZ_PASSWORD, server=SERVER) as client:
