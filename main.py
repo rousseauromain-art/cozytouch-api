@@ -8,9 +8,8 @@ from pyoverkiz.client import OverkizClient
 from pyoverkiz.const import SUPPORTED_SERVERS
 from pyoverkiz.models import Command
 
-VERSION = "4.0 (Absence Mode Fix)"
+VERSION = "4.1 (Manuel 16°C / Retour Prog)"
 
-# Configuration
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 OVERKIZ_EMAIL = os.getenv("OVERKIZ_EMAIL")
 OVERKIZ_PASSWORD = os.getenv("OVERKIZ_PASSWORD")
@@ -23,6 +22,7 @@ async def apply_heating_mode(target_mode):
             devices = await client.get_devices()
             print(f"\n>>> DEBUG - ACTION: {target_mode} <<<")
             
+            # Récupération des températures pour le rapport
             stats = {}
             for d in devices:
                 root_id = d.device_url.split('/')[-1].split('#')[0]
@@ -43,47 +43,44 @@ async def apply_heating_mode(target_mode):
                     status = ""
                     try:
                         if target_mode == "HOME":
-                            # Retour au mode normal / programmation
+                            # REPRISE DE LA PROGRAMMATION
+                            print(f"DEBUG: Retour PROG sur {short_id}")
                             cmd_name = "setOperatingMode" if "Heater" in d.widget else "setTowelDryerOperatingMode"
                             await client.execute_commands(d.device_url, [Command(name=cmd_name, parameters=["internal"])])
+                            status = " | ✅ PROG REPRISE"
                         
                         elif target_mode == "ABSENCE":
-                            # ON TESTE LA COMMANDE DÉDIÉE D'ABSENCE
-                            # Sur Atlantic, 'setAbsenceMode' avec 'absence' ou 'frostprotection'
-                            # Si c'est un radiateur Oniris :
-                            if "Heater" in d.widget:
-                                # On tente la commande de dérogation d'absence directe
-                                print(f"DEBUG: Tentative setAbsenceMode sur {short_id}")
-                                await client.execute_commands(d.device_url, [Command(name="setAbsenceMode", parameters=["frostprotection"])])
-                            else:
-                                # Pour le sèche-serviette, on force le mode standby qui est son équivalent absence sécurisé
-                                # ou on tente aussi le setAbsenceMode
-                                await client.execute_commands(d.device_url, [Command(name="setTowelDryerOperatingMode", parameters=["standby"])])
+                            # PASSAGE EN MANUEL (BASIC/EXTERNAL) + CONSIGNE 16°C
+                            print(f"DEBUG: Passage Manuel 16°C sur {short_id}")
+                            
+                            # 1. On change le mode pour autoriser la main sur la température
+                            mode_cmd = "setOperatingMode" if "Heater" in d.widget else "setTowelDryerOperatingMode"
+                            mode_param = "basic" if "Heater" in d.widget else "external"
+                            
+                            # 2. On envoie les deux commandes : Mode Manuel PUIS Température 16
+                            # Envoyer les deux dans la même liste garantit la prise en compte par Atlantic
+                            commands = [
+                                Command(name=mode_cmd, parameters=[mode_param]),
+                                Command(name="setTargetTemperature", parameters=[16.0])
+                            ]
+                            await client.execute_commands(d.device_url, commands)
+                            status = " | ✅ MANUEL 16°C"
 
-                        status = " | ✅ OK"
-                        print(f"DEBUG: Succès sur {short_id}")
                     except Exception as e:
-                        # Si setAbsenceMode échoue, on tente une dernière chance avec setDerogatedTargetTemperature
-                        print(f"DEBUG: Echec commande standard, tentative alternative sur {short_id}")
-                        try:
-                            if target_mode == "ABSENCE":
-                                # Forçage manuel à 7°C (Hors Gel universel)
-                                await client.execute_commands(d.device_url, [Command(name="setTargetTemperature", parameters=[7])])
-                                status = " | ✅ OK (Forcé 7°C)"
-                        except:
-                            status = f" | ❌ Erreur"
-
-                    res = stats[short_id.split('#')[0]]
-                    results.append(f"<b>{d.label}</b>\n└ T°: {res['temp']}°C | Consigne: {res['target']}°C{status}")
+                        print(f"DEBUG: Erreur sur {short_id}: {e}")
+                        status = f" | ❌ Erreur"
+                    
+                    res = stats.get(short_id.split('#')[0])
+                    results.append(f"<b>{d.label}</b>\n└ T°: {res['temp']} | Consigne: {res['target']}{status}")
 
             return "\n\n".join(results)
         except Exception as e:
             return f"Erreur session : {str(e)}"
 
-# --- INTERFACE TELEGRAM ---
+# --- INTERFACE TELEGRAM (Identique) ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [[InlineKeyboardButton("🏠 MAISON", callback_data="HOME"), 
-                 InlineKeyboardButton("❄️ ABSENCE", callback_data="ABSENCE")],
+    keyboard = [[InlineKeyboardButton("🏠 MAISON (Prog)", callback_data="HOME"), 
+                 InlineKeyboardButton("❄️ ABSENCE (16°C)", callback_data="ABSENCE")],
                 [InlineKeyboardButton("🔍 ÉTAT ACTUEL", callback_data="LIST")]]
     await update.message.reply_text(f"<b>PILOTAGE v{VERSION}</b>", parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
 
@@ -97,6 +94,7 @@ def main():
     application = Application.builder().token(TOKEN).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CallbackQueryHandler(button_handler))
+    print(f"=== DEMARRAGE v{VERSION} ===")
     application.run_polling()
 
 if __name__ == "__main__":
