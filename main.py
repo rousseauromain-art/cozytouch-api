@@ -6,8 +6,9 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from pyoverkiz.client import OverkizClient
 from pyoverkiz.const import SUPPORTED_SERVERS
+from pyoverkiz.models import Command # Import pour formater proprement les commandes
 
-VERSION = "2.9 (IDs & Command Fix)"
+VERSION = "3.1 (Fix JSON & Temps)"
 
 # Configuration
 TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -18,55 +19,63 @@ async def apply_heating_mode(target_mode):
         try:
             await client.login()
             devices = await client.get_devices()
-            results = []
             
+            # 1. On crée un dictionnaire des températures par "racine" d'ID (ex: 14253355)
+            temps = {}
+            for d in devices:
+                if "TemperatureState" in d.states:
+                    root_id = d.device_url.split('/')[-1].split('#')[0]
+                    val = d.states.get("core:TemperatureState").value
+                    if val: temps[root_id] = val
+
+            results = []
             print(f"\n>>> ACTION: {target_mode} <<<")
             
             for d in devices:
-                # Filtrage : Radiateurs (AdjustableSetpoint) et Sèche-serviette (TowelDryer)
+                # On cible les contrôleurs (#1)
                 if d.widget in ["AtlanticElectricalHeaterWithAdjustableTemperatureSetpoint", "AtlanticElectricalTowelDryer"]:
-                    
-                    # Extraction simplifiée de l'ID (les 4 derniers chiffres de l'URL)
                     short_id = d.device_url.split('/')[-1]
+                    root_id = short_id.split('#')[0]
                     
-                    if target_mode != "LIST":
+                    status = ""
+                    if target_mode in ["HOME", "ABSENCE"]:
                         try:
-                            # Mapping des commandes selon le log HA : parameters=['basic'] ou ['away']
-                            cmd_param = "away" if target_mode == "ABSENCE" else "basic"
+                            cmd_name = "setOperatingMode"
+                            cmd_val = "away" if target_mode == "ABSENCE" else "basic"
                             
-                            # TEST SYNTAXE : On envoie la commande telle qu'attendue par l'API
-                            print(f"Tentative sur {d.label} ({short_id}) -> {cmd_param}")
-                            await client.execute_command(d.device_url, "setOperatingMode", [cmd_param])
-                            status = "✅ OK"
+                            # NOUVELLE SYNTAXE : On utilise l'objet Command pour un JSON parfait
+                            command = Command(name=cmd_name, parameters=[cmd_val])
+                            await client.execute_command(d.device_url, command.name, command.parameters)
+                            
+                            print(f"✅ {d.label} ({short_id}) -> {cmd_val}")
+                            status = " | ✅ OK"
                         except Exception as e:
-                            print(f"Erreur sur {short_id}: {e}")
-                            status = "❌ Erreur JSON"
-                    else:
-                        status = "Info"
+                            print(f"❌ Erreur {short_id}: {e}")
+                            status = " | ❌ Erreur"
 
-                    # Lecture état
-                    temp = d.states.get("core:TemperatureState")
-                    t_val = f"{round(temp.value, 1)}C" if (temp and temp.value is not None) else "??"
+                    # Récupération de la température depuis notre dictionnaire
+                    current_temp = temps.get(root_id, "??")
+                    t_str = f"{round(current_temp, 1)}°C" if isinstance(current_temp, (int, float)) else "??"
                     
-                    # On ajoute l'ID dans le message Telegram
-                    results.append(f"ID:{short_id} | {d.label}\n   └ Temp: {t_val} | {status}")
+                    results.append(f"<b>{d.label}</b> ({short_id})\n└ Temp: {t_str}{status}")
             
-            return "\n".join(results) if results else "Aucun appareil trouvé."
+            return "\n\n".join(results) if results else "Aucun appareil trouvé."
         except Exception as e:
             return f"Erreur de connexion : {str(e)}"
 
+# --- LE RESTE DU CODE (Start / Button) RESTE IDENTIQUE ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [[InlineKeyboardButton("🏠 MAISON", callback_data="HOME"), 
                  InlineKeyboardButton("❄️ ABSENCE", callback_data="ABSENCE")],
-                [InlineKeyboardButton("🔍 LISTING COMPLET", callback_data="LIST")]]
-    await update.message.reply_text(f"CONTROLE v{VERSION}", reply_markup=InlineKeyboardMarkup(keyboard))
+                [InlineKeyboardButton("🔍 ÉTAT ACTUEL", callback_data="LIST")]]
+    await update.message.reply_text(f"<b>PILOTAGE v{VERSION}</b>", parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    await query.edit_message_text(text="⏳ Traitement en cours...")
+    await query.edit_message_text(text="⏳ Traitement...")
     report = await apply_heating_mode(query.data)
-    await query.edit_message_text(text=f"RAPPORT v{VERSION} :\n\n{report}")
+    await query.edit_message_text(text=f"<b>RAPPORT v{VERSION}</b>\n\n{report}", parse_mode='HTML')
 
 def main():
     application = Application.builder().token(TOKEN).build()
