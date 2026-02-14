@@ -7,7 +7,7 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Cont
 from pyoverkiz.client import OverkizClient
 from pyoverkiz.const import SUPPORTED_SERVERS
 
-VERSION = "2.6 (Logs Visibles & Command Fix)"
+VERSION = "2.7 (Identification Totale)"
 
 # --- CONFIGURATION LOGS ---
 # On force le niveau INFO pour être sûr de voir nos messages
@@ -27,47 +27,43 @@ except:
     MY_SERVER = SUPPORTED_SERVERS.get("ATLANTIC_COZYTOUCH")
 
 async def apply_heating_mode(target_mode):
-    async with OverkizClient(OVERKIZ_EMAIL, OVERKIZ_PASSWORD, server=MY_SERVER) as client:
+    async with OverkizClient(os.getenv("OVERKIZ_EMAIL"), os.getenv("OVERKIZ_PASSWORD"), server=MY_SERVER) as client:
         try:
             await client.login()
-            # LOG VISIBLE DANS KOYEB
-            print(f"\n>>> CONNEXION REUSSIE - ACTION: {target_mode} <<<")
-            
             devices = await client.get_devices()
             results = []
             
+            print(f"\n>>> SCAN COMPLET - ACTION: {target_mode} <<<")
+            
             for d in devices:
-                # On cherche les radiateurs (Oniris, Adelis)
+                # On affiche TOUS les appareils dans la console pour identifier le sèche-serviette
+                print(f"DEBUG: Appareil détecté -> Nom: {d.label} | Modèle: {d.widget} | URL: {d.device_url}")
+                
                 available_cmds = [c.command_name for c in d.definition.commands]
                 
-                if "setOperatingMode" in available_cmds:
-                    # LOG POUR CHAQUE RADIATEUR
-                    print(f"--- Tentative sur : {d.label} ---")
-                    
+                # On cible tout ce qui peut chauffer
+                if "setOperatingMode" in available_cmds or "setHeatingLevel" in available_cmds:
                     try:
                         if target_mode in ["ABSENCE", "HOME"]:
-                            # 'away' pour absence, 'basic' pour maison (vu dans tes logs HA)
                             cmd_param = "away" if target_mode == "ABSENCE" else "basic"
                             
+                            # Correction de la syntaxe de commande pour éviter INVALID_API_CALL
                             await client.execute_command(d.device_url, "setOperatingMode", [cmd_param])
-                            print(f"SUCCES: {d.label} passe en {cmd_param}")
+                            print(f"SUCCÈS: {d.label} -> {cmd_param}")
                         
-                        # Lecture état
+                        # Lecture des infos
                         temp = d.states.get("core:TemperatureState")
                         t_val = f"{round(temp.value, 1)}C" if (temp and temp.value is not None) else "??"
+                        mode = d.states.get("core:OperatingModeState")
+                        m_val = mode.value if mode else "eco/confort"
                         
-                        # Récupération du mode actuel pour confirmation
-                        curr_mode = d.states.get("core:OperatingModeState")
-                        m_val = curr_mode.value if curr_mode else "non lu"
-                        
-                        results.append(f"- {d.label}: {t_val} (Mode: {m_val})")
+                        results.append(f"- {d.label}: {t_val} ({m_val})")
                     except Exception as e:
                         print(f"ERREUR sur {d.label}: {e}")
-                        results.append(f"- {d.label}: Erreur commande")
+                        results.append(f"- {d.label}: Erreur")
             
             return "\n".join(results) if results else "Aucun appareil trouvé."
         except Exception as e:
-            print(f"ERREUR CRITIQUE: {e}")
             return f"Erreur connexion: {str(e)}"
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
