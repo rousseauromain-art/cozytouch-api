@@ -6,7 +6,7 @@ from pyoverkiz.client import OverkizClient
 from pyoverkiz.const import SUPPORTED_SERVERS
 from pyoverkiz.models import Command
 
-VERSION = "4.7 (Scanner d'états Deep Debug) "
+VERSION = "4.7.1 (Fix AttributeError States)"
 
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 OVERKIZ_EMAIL = os.getenv("OVERKIZ_EMAIL")
@@ -26,49 +26,47 @@ async def get_detailed_listing():
         devices = await client.get_devices()
         res = []
         
-        print("\n=== SCAN COMPLET DES ÉTATS (Koyeb Debug) ===")
+        print("\n=== SCAN DES ÉTATS (Debug Koyeb) ===")
         for d in devices:
             sid = d.device_url.split('/')[-1]
             if sid in CONFORT_TEMPS:
                 print(f"\n[APPAREIL: {d.label} ({sid})]")
-                # On print ABSOLUMENT TOUT dans Koyeb pour trouver les bonnes clés
-                for state_name, state_obj in d.states.items():
-                    print(f"  - {state_name}: {state_obj.value}")
+                
+                # Correction ici : d.states est une liste d'objets State
+                states_dict = {s.name: s.value for s in d.states}
+                for name, val in states_dict.items():
+                    print(f"  - {name}: {val}")
 
                 nom = "Sèche-Serviette" if sid == "4326513#1" else d.label
                 
-                # Tentative de récupération multi-clés pour la température mesurée
-                ambient = d.states.get("core:TemperatureState") or \
-                          d.states.get("io:EffectiveTemperatureState") or \
-                          d.states.get("core:LuminanceState") # Parfois détourné
-                ambient_val = round(ambient.value, 1) if (ambient and ambient.value is not None) else "?"
-
-                # Tentative pour la consigne
-                target = d.states.get("core:TargetTemperatureState") or \
-                         d.states.get("core:EcoHeatingTargetTemperatureState")
-                target_val = target.value if (target and target.value is not None) else "?"
-
-                # Mode et Niveau
-                op_mode = d.states.get("core:OperatingModeState") or d.states.get("io:TowelDryerOperatingModeState")
-                heating_level = d.states.get("io:TargetHeatingLevelState")
+                # --- RÉCUPÉRATION DES VALEURS ---
+                # Température mesurée (Ambiante)
+                ambient_val = states_dict.get("core:TemperatureState", "?")
+                if ambient_val == "?":
+                    ambient_val = states_dict.get("io:EffectiveTemperatureState", "?")
                 
-                level_str = ""
-                if heating_level:
-                    level_str = "🔥 Confort" if heating_level.value == "comfort" else "🌙 Eco"
+                # Température de consigne (Target)
+                target_val = states_dict.get("core:TargetTemperatureState", "?")
+                
+                # Mode de fonctionnement
+                op_mode = states_dict.get("core:OperatingModeState") or states_dict.get("io:TowelDryerOperatingModeState", "?")
+                
+                # Niveau (Eco / Confort)
+                level = states_dict.get("io:TargetHeatingLevelState", "")
+                level_str = "🔥 Confort" if level == "comfort" else "🌙 Eco" if level == "eco" else ""
 
                 line = f"<b>{nom}</b>\n"
-                line += f"└ Mode: {op_mode.value if op_mode else '?'}\n"
-                line += f"└ Planning: {level_str if level_str else 'N/A'}\n"
+                line += f"└ Mode: {op_mode} {level_str}\n"
                 line += f"└ Consigne: <b>{target_val}°C</b> | Mesuré: {ambient_val}°C"
                 res.append(line)
         
         return "\n\n".join(res)
 
 async def apply_heating_mode(target_mode, custom_temp=None):
+    # Logique d'envoi conservée (v4.3 stable)
     async with OverkizClient(OVERKIZ_EMAIL, OVERKIZ_PASSWORD, server=MY_SERVER) as client:
         await client.login()
         devices = await client.get_devices()
-        
         for d in devices:
             sid = d.device_url.split('/')[-1]
             if sid in CONFORT_TEMPS:
@@ -78,24 +76,16 @@ async def apply_heating_mode(target_mode, custom_temp=None):
                 if target_mode == "HOME": val = CONFORT_TEMPS[sid]
                 
                 try:
-                    target_cmd = "setTargetTemperature"
-                    # Pour certains modèles, la commande de consigne change en manuel
-                    print(f"DEBUG: Envoi {val}°C à {sid}")
-                    
-                    cmds = [Command(name=target_cmd, parameters=[val])]
-                    if target_mode == "HOME":
-                        cmds.append(Command(name=mode_cmd, parameters=["internal"]))
-                    else:
-                        cmds.append(Command(name=mode_cmd, parameters=[mode_manuel]))
-                    
+                    cmds = [
+                        Command(name="setTargetTemperature", parameters=[val]),
+                        Command(name=mode_cmd, parameters=["internal" if target_mode == "HOME" else mode_manuel])
+                    ]
                     await client.execute_commands(d.device_url, cmds)
-                except Exception as e:
-                    print(f"ERREUR EXEC {sid}: {e}")
-
+                except Exception as e: print(f"Erreur {sid}: {e}")
         await asyncio.sleep(10)
-        return "Commandes envoyées. Faites 'LIST' pour vérifier."
+        return "Action terminée."
 
-# --- INTERFACE IDENTIQUE ---
+# --- HANDLERS (Identiques) ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [[InlineKeyboardButton("🏠 MAISON", callback_data="HOME")],
                 [InlineKeyboardButton("❄️ ABSENCE (16°C)", callback_data="ABS_16")],
@@ -106,14 +96,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     if query.data == "LIST":
-        await query.edit_message_text("🔍 Scan des états en cours...")
+        await query.edit_message_text("🔍 Scan en cours...")
         report = await get_detailed_listing()
         await query.edit_message_text(f"<b>ÉTAT ACTUEL</b>\n\n{report}", parse_mode='HTML')
     else:
         await query.edit_message_text("⏳ Synchronisation...")
         t = 16.0 if "ABS" in query.data else None
         await apply_heating_mode("HOME" if query.data=="HOME" else "ABSENCE", custom_temp=t)
-        await query.edit_message_text("✅ Action terminée. Refaites un LIST.")
+        await query.edit_message_text("✅ Fait. Vérifiez avec LIST.")
 
 def main():
     application = Application.builder().token(TOKEN).build()
