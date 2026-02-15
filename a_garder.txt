@@ -1,103 +1,134 @@
-il faut bien mettre dans KOYEB dans le run : python main.py
-
-import os
-import asyncio
-import logging
-import signal
+import os, asyncio, threading, sys, time
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from pyoverkiz.client import OverkizClient
 from pyoverkiz.const import SUPPORTED_SERVERS
 from pyoverkiz.models import Command
 
-VERSION = "3.2 (Logs Restaurés & Fix JSON)"
+VERSION = "8.0 (Shelly & Clean)"
 
-# --- CONFIGURATION LOGS ---
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("BOT")
-
+# --- CONFIGURATION ---
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 OVERKIZ_EMAIL = os.getenv("OVERKIZ_EMAIL")
 OVERKIZ_PASSWORD = os.getenv("OVERKIZ_PASSWORD")
+MY_SERVER = SUPPORTED_SERVERS["atlantic_cozytouch"]
 
-try:
-    MY_SERVER = SUPPORTED_SERVERS["atlantic_cozytouch"]
-    print("✅ LOG: Serveur Atlantic chargé")
-except:
-    MY_SERVER = SUPPORTED_SERVERS.get("ATLANTIC_COZYTOUCH")
+# Shelly Cloud Config (à remplir dans tes variables d'env Koyeb)
+SHELLY_AUTH_KEY = os.getenv("SHELLY_AUTH_KEY")
+SHELLY_ID = os.getenv("SHELLY_ID")
+SHELLY_SERVER = os.getenv("SHELLY_SERVER", "shelly-61-eu.shelly.cloud")
 
-async def apply_heating_mode(target_mode):
+ROOMS = {
+    "io://2091-1547-6688/14253355": "Salon",
+    "io://2091-1547-6688/1640746": "Chambre",
+    "io://2091-1547-6688/190387": "Bureau",
+    "io://2091-1547-6688/4326513": "Sèche-Serviette"
+}
+
+CONFORT_TEMPS = {
+    "14253355#1": 19.5, "1640746#1": 19.0, "190387#1": 19.0, "4326513#1": 19.5
+}
+
+class KeepAliveServer(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot OK")
+
+def run_web_server():
+    HTTPServer(('0.0.0.0', 8000), KeepAliveServer).serve_forever()
+
+async def get_shelly_temp():
+    """Interroge l'API Cloud de Shelly pour le GT3"""
+    if not SHELLY_AUTH_KEY or not SHELLY_ID:
+        return None
+    import httpx
+    url = f"https://{SHELLY_SERVER}/device/status"
+    data = {"id": SHELLY_ID, "auth_key": SHELLY_AUTH_KEY}
+    try:
+        async with httpx.AsyncClient() as client:
+            r = await client.post(url, data=data)
+            res = r.json()
+            # Structure typique Shelly Plus/Pro/Gen3 : status['temperature:0']['tC']
+            return res['data']['device_status']['temperature:0']['tC']
+    except:
+        return None
+
+async def get_detailed_listing():
+    print(f"\n--- SCAN v{VERSION} ---")
     async with OverkizClient(OVERKIZ_EMAIL, OVERKIZ_PASSWORD, server=MY_SERVER) as client:
-        try:
-            await client.login()
-            print(f"\n>>> DÉBUT SESSION - ACTION: {target_mode} <<<")
+        await client.login()
+        all_devices = await client.get_devices()
+        results = {name: {"temp": None, "target": None} for name in ROOMS.values()}
+        
+        for d in all_devices:
+            states = {s.name: s.value for s in d.states}
+            # DEBUG MAX toujours présent
+            print(f"DEBUG: {d.label} | {d.device_url} | States: {states}")
             
-            devices = await client.get_devices()
-            
-            # 1. Extraction des températures (on logue pour vérifier)
-            temps = {}
-            for d in devices:
-                if "core:TemperatureState" in d.states:
-                    root_id = d.device_url.split('/')[-1].split('#')[0]
-                    val = d.states.get("core:TemperatureState").value
-                    if val is not None:
-                        temps[root_id] = val
-                        print(f"DEBUG TEMP: {root_id} mesure {val}°C")
+            base_url = d.device_url.split('#')[0]
+            if base_url in ROOMS:
+                room_name = ROOMS[base_url]
+                t_val = states.get("core:TemperatureState")
+                if t_val and t_val > 0: results[room_name]["temp"] = t_val
+                if "io:EffectiveTemperatureSetpointState" in states:
+                    results[room_name]["target"] = states["io:EffectiveTemperatureSetpointState"]
 
-            results = []
-            for d in devices:
-                # Cible : Radiateurs Oniris et Sèche-serviette
-                if d.widget in ["AtlanticElectricalHeaterWithAdjustableTemperatureSetpoint", "AtlanticElectricalTowelDryer"]:
-                    short_id = d.device_url.split('/')[-1]
-                    root_id = short_id.split('#')[0]
-                    
-                    status = ""
-                    if target_mode in ["HOME", "ABSENCE"]:
-                        try:
-                            cmd_val = "away" if target_mode == "ABSENCE" else "basic"
-                            print(f"TENTATIVE: {d.label} ({short_id}) -> {cmd_val}")
-                            
-                            # Utilisation de la structure Command pour éviter INVALID_API_CALL
-                            await client.execute_command(d.device_url, "setOperatingMode", [cmd_val])
-                            
-                            print(f"RETOUR: Succès pour {short_id}")
-                            status = " | ✅ OK"
-                        except Exception as e:
-                            print(f"ERREUR sur {short_id}: {e}")
-                            status = " | ❌ Erreur"
+        # Récupération Shelly pour le Bureau
+        shelly_t = await get_shelly_temp()
+        
+        report = []
+        for room, data in results.items():
+            t_amb = f"<b>{data['temp']}°C</b>" if data['temp'] else "--"
+            t_set = f"<b>{data['target']}°C</b>" if data['target'] else "--"
+            line = f"📍 {room}: {t_amb} (Consigne: {t_set})"
+            if room == "Bureau" and shelly_t:
+                line += f"\n   └ 🌡️ Shelly GT3: <b>{shelly_t}°C</b>"
+            report.append(line)
 
-                    # Construction de la ligne de rapport
-                    current_temp = temps.get(root_id, "??")
-                    t_str = f"{round(current_temp, 1)}°C" if isinstance(current_temp, (int, float)) else "??"
-                    results.append(f"<b>{d.label}</b> ({short_id})\n└ Temp: {t_str}{status}")
+        return "\n".join(report)
 
-            print(f">>> FIN SESSION - {len(results)} appareils traités <<<\n")
-            return "\n\n".join(results)
-        except Exception as e:
-            print(f"ERREUR CRITIQUE: {e}")
-            return f"Erreur : {str(e)}"
+async def apply_heating_mode(target_mode, custom_temp=None):
+    async with OverkizClient(OVERKIZ_EMAIL, OVERKIZ_PASSWORD, server=MY_SERVER) as client:
+        await client.login()
+        devices = await client.get_devices()
+        for d in devices:
+            sid = d.device_url.split('/')[-1]
+            if sid in CONFORT_TEMPS:
+                is_towel = "Towel" in getattr(d, 'widget', '')
+                mode_cmd = "setTowelDryerOperatingMode" if is_towel else "setOperatingMode"
+                manuel_val = "external" if is_towel else "basic"
+                val = custom_temp if custom_temp else (CONFORT_TEMPS.get(sid, 19.0) if target_mode == "HOME" else 16.0)
+                
+                print(f"[CMD] {sid} -> {val}°C")
+                await client.execute_commands(d.device_url, [
+                    Command(name="setTargetTemperature", parameters=[val]),
+                    Command(name=mode_cmd, parameters=["internal" if target_mode == "HOME" else manuel_val])
+                ])
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    print(f"--- /start reçu (PID: {os.getpid()}) ---")
-    keyboard = [[InlineKeyboardButton("🏠 MAISON", callback_data="HOME"), 
-                 InlineKeyboardButton("❄️ ABSENCE", callback_data="ABSENCE")],
-                [InlineKeyboardButton("🔍 ÉTAT ACTUEL", callback_data="LIST")]]
-    await update.message.reply_text(f"<b>PILOTAGE v{VERSION}</b>", parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+def get_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🏠 MAISON", callback_data="HOME"), InlineKeyboardButton("❄️ ABSENCE", callback_data="ABS_16")],
+        [InlineKeyboardButton("🔍 ACTUALISER", callback_data="LIST")]
+    ])
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    print(f"CLIC BOUTON: {query.data}")
-    await query.edit_message_text(text="⏳ Traitement en cours...")
-    report = await apply_heating_mode(query.data)
-    await query.edit_message_text(text=f"<b>RAPPORT v{VERSION}</b>\n\n{report}", parse_mode='HTML')
+    m = await query.edit_message_text("⏳")
+    if query.data != "LIST":
+        await apply_heating_mode("HOME" if query.data == "HOME" else "ABS", custom_temp=16.0 if "ABS" in query.data else None)
+    report = await get_detailed_listing()
+    await m.edit_text(f"<b>ÉTAT v{VERSION}</b>\n\n{report}", parse_mode='HTML', reply_markup=get_keyboard())
 
 def main():
-    application = Application.builder().token(TOKEN).build()
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CallbackQueryHandler(button_handler))
-    print(f"=== DÉMARRAGE v{VERSION} (PID: {os.getpid()}) ===")
-    application.run_polling(stop_signals=[signal.SIGTERM, signal.SIGINT])
+    threading.Thread(target=run_web_server, daemon=True).start()
+    app = Application.builder().token(TOKEN).build()
+    app.add_handler(CommandHandler("start", lambda u,c: u.message.reply_text("Bot Ready", reply_markup=get_keyboard())))
+    app.add_handler(CallbackQueryHandler(button_handler))
+    # drop_pending_updates aide à éviter le conflit au reboot
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
