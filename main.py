@@ -9,7 +9,7 @@ from pyoverkiz.client import OverkizClient
 from pyoverkiz.const import SUPPORTED_SERVERS
 from pyoverkiz.models import Command
 
-VERSION = "9.4 (Actions Restore & Debug Max)"
+VERSION = "9.5 (Actions & Full Debug)"
 
 # --- CONFIG ---
 TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -28,55 +28,72 @@ ROOMS = {
     "io://2091-1547-6688/4326513": "Sèche-Serviette"
 }
 
-# --- LOGIQUE D'ACTION (HOME / ABS) ---
+# --- INITIALISATION DB ---
+def init_db():
+    if not DB_URL:
+        print("DEBUG: [DB] Pas de DATABASE_URL.")
+        return
+    try:
+        conn = psycopg2.connect(DB_URL)
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS temp_logs (
+                id SERIAL PRIMARY KEY,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                room TEXT,
+                temp_radiateur FLOAT,
+                temp_shelly FLOAT,
+                consigne FLOAT
+            );
+        """)
+        conn.commit()
+        cur.close(); conn.close()
+        print("DEBUG: [DB] Table prête.")
+    except Exception as e: print(f"DEBUG: [DB ERR] {e}")
 
+# --- API SHELLY ---
+async def get_shelly_temp():
+    if not SHELLY_TOKEN: return None
+    url = f"https://{SHELLY_SERVER}/device/status"
+    try:
+        async with httpx.AsyncClient() as client:
+            r = await client.post(url, data={"id": SHELLY_ID, "auth_key": SHELLY_TOKEN}, timeout=10)
+            return r.json()['data']['device_status']['temperature:0']['tC']
+    except Exception as e:
+        print(f"DEBUG: [SHELLY ERR] {e}")
+        return None
+
+# --- ACTIONS (HOME / ABSENCE) ---
 async def set_heating_mode(mode_type):
-    """mode_type: 'HOME' ou 'ABS'"""
-    print(f"DEBUG: [ACTION] Tentative de passage en mode {mode_type}...")
+    print(f"DEBUG: [ACTION] Mode {mode_type} demandé.")
     async with OverkizClient(OVERKIZ_EMAIL, OVERKIZ_PASSWORD, server=MY_SERVER) as client:
         await client.login()
         devices = await client.get_devices()
-        
-        executed_count = 0
+        count = 0
         for d in devices:
             base_url = d.device_url.split('#')[0]
             if base_url in ROOMS:
-                print(f"DEBUG: [ACTION] Envoi commande vers {ROOMS[base_url]}...")
-                
                 if mode_type == "HOME":
-                    # Mode Confort / Auto
                     cmd = Command("setHeatingLevel", ["comfort"])
                 else:
-                    # Mode Absence (16°C par exemple)
                     cmd = Command("setTargetTemperature", [16])
                 
                 try:
                     await client.execute_command(d.device_url, cmd)
-                    executed_count += 1
-                    print(f"DEBUG: [ACTION] Succès pour {ROOMS[base_url]}")
+                    print(f"DEBUG: [ACTION] OK pour {ROOMS[base_url]}")
+                    count += 1
                 except Exception as e:
-                    print(f"DEBUG: [ACTION ERR] Échec pour {ROOMS[base_url]} : {e}")
-        
-        return executed_count
+                    print(f"DEBUG: [ACTION ERR] {ROOMS[base_url]} : {e}")
+        return count
 
-# --- LOGIQUE D'ENREGISTREMENT ---
-
+# --- RELEVÉS ET AFFICHAGE ---
 async def perform_record(label="AUTO"):
-    print(f"DEBUG: [{label}] Relevé en cours...")
     try:
         async with OverkizClient(OVERKIZ_EMAIL, OVERKIZ_PASSWORD, server=MY_SERVER) as client:
             await client.login()
             devices = await client.get_devices()
+            shelly_t = await get_shelly_temp()
             
-            # Shelly
-            shelly_t = None
-            try:
-                url = f"https://{SHELLY_SERVER}/device/status"
-                async with httpx.AsyncClient() as h:
-                    r = await h.post(url, data={"id": SHELLY_ID, "auth_key": SHELLY_TOKEN}, timeout=10)
-                    shelly_t = r.json()['data']['device_status']['temperature:0']['tC']
-            except: pass
-
             conn = psycopg2.connect(DB_URL)
             cur = conn.cursor()
             for d in devices:
@@ -91,38 +108,69 @@ async def perform_record(label="AUTO"):
                                    (ROOMS[base_url], t_rad, t_sh, t_set))
             conn.commit()
             cur.close(); conn.close()
-            print(f"DEBUG: [{label}] Données enregistrées.")
+            print(f"DEBUG: [{label}] Relevé DB réussi.")
     except Exception as e: print(f"DEBUG: [{label} ERR] {e}")
 
-async def background_logger():
-    await asyncio.sleep(5)
-    while True:
-        await perform_record("AUTO")
-        await asyncio.sleep(3600)
+async def get_full_status():
+    async with OverkizClient(OVERKIZ_EMAIL, OVERKIZ_PASSWORD, server=MY_SERVER) as client:
+        await client.login()
+        devices = await client.get_devices()
+        shelly_t = await get_shelly_temp()
+        results = {name: {"temp": "--", "target": "--"} for name in ROOMS.values()}
+        
+        for d in devices:
+            base_url = d.device_url.split('#')[0]
+            if base_url in ROOMS:
+                room = ROOMS[base_url]
+                states = {s.name: s.value for s in d.states}
+                results[room]["temp"] = states.get("core:TemperatureState", "--")
+                results[room]["target"] = states.get("io:EffectiveTemperatureSetpointState") or states.get("core:TargetTemperatureState", "--")
+                print(f"DEBUG: [LIST] {room} : {results[room]['temp']}°C / Cible: {results[room]['target']}°C")
 
-# --- TELEGRAM HANDLERS ---
+        lines = []
+        for room, data in results.items():
+            t_display = f"<b>{data['temp']}°C</b>" if data['temp'] != "--" else "--"
+            s_display = f"<b>{data['target']}°C</b>" if data['target'] != "--" else "--"
+            line = f"📍 {room}: {t_display} (Cible: {s_display})"
+            if room == "Bureau" and shelly_t:
+                diff = f" (Δ {shelly_t - data['temp']:+.1f}°C)" if data['temp'] != "--" else ""
+                line += f"\n   └ 🌡️ Shelly: <b>{shelly_t}°C</b>{diff}"
+            lines.append(line)
+        
+        await perform_record("MANUEL")
+        return "\n".join(lines)
 
+# --- GESTIONNAIRE DE BOUTONS ---
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
     if query.data == "LIST":
-        # ... (Logique get_full_status identique à v9.3)
-        pass
-
+        txt = await get_full_status()
+        await query.edit_message_text(f"🌡️ <b>ÉTAT DU CHAUFFAGE</b>\n\n{txt}", parse_mode='HTML', reply_markup=get_keyboard())
+    
     elif query.data == "HOME":
         m = await query.edit_message_text("🏠 Passage en mode MAISON...")
         count = await set_heating_mode("HOME")
-        await m.edit_text(f"✅ Mode MAISON activé sur {count} appareils.", reply_markup=get_keyboard())
+        await m.edit_text(f"✅ Mode MAISON activé ({count} appareils).", reply_markup=get_keyboard())
 
     elif query.data == "ABS_16":
         m = await query.edit_message_text("❄️ Passage en mode ABSENCE (16°C)...")
         count = await set_heating_mode("ABS")
-        await m.edit_text(f"✅ Mode ABSENCE activé sur {count} appareils.", reply_markup=get_keyboard())
+        await m.edit_text(f"✅ Mode ABSENCE activé ({count} appareils).", reply_markup=get_keyboard())
 
     elif query.data == "REPORT":
-        # ... (Logique Report identique à v9.3)
-        pass
+        try:
+            conn = psycopg2.connect(DB_URL)
+            cur = conn.cursor()
+            cur.execute("SELECT AVG(temp_radiateur), AVG(temp_shelly), AVG(temp_shelly - temp_radiateur), COUNT(*) FROM temp_logs WHERE room = 'Bureau' AND timestamp > NOW() - INTERVAL '7 days' AND temp_shelly IS NOT NULL;")
+            stats = cur.fetchone()
+            cur.close(); conn.close()
+            if stats and stats[3] > 0:
+                msg = (f"📊 <b>BILAN 7 JOURS (Bureau)</b>\n\n• Moy. Radiateur : {stats[0]:.1f}°C\n• Moy. Shelly GT3 : {stats[1]:.1f}°C\n• <b>Écart moyen : {stats[2]:+.1f}°C</b>\n\n<i>Basé sur {stats[3]} mesures.</i>")
+            else: msg = "⚠️ Pas encore assez de données."
+            await query.message.reply_text(msg, parse_mode='HTML')
+        except Exception as e: print(f"DEBUG: [REPORT ERR] {e}")
 
 def get_keyboard():
     return InlineKeyboardMarkup([
@@ -131,7 +179,12 @@ def get_keyboard():
         [InlineKeyboardButton("📊 RAPPORT 7J", callback_data="REPORT")]
     ])
 
-# ... (Main, HealthCheck, etc. comme v9.3)
+# --- LOGS DE FOND ---
+async def background_logger():
+    await asyncio.sleep(5)
+    while True:
+        await perform_record("AUTO")
+        await asyncio.sleep(3600)
 
 class Health(BaseHTTPRequestHandler):
     def do_GET(self): self.send_response(200); self.end_headers(); self.wfile.write(b"OK")
@@ -139,14 +192,11 @@ class Health(BaseHTTPRequestHandler):
 def main():
     init_db()
     threading.Thread(target=lambda: HTTPServer(('0.0.0.0', 8000), Health).serve_forever(), daemon=True).start()
-    
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", lambda u,c: u.message.reply_text(f"🚀 Thermostat Connecté (v{VERSION})", reply_markup=get_keyboard())))
     app.add_handler(CallbackQueryHandler(button_handler))
-    
     loop = asyncio.get_event_loop()
     loop.create_task(background_logger())
-    
     print(f"Démarrage v{VERSION}")
     app.run_polling(drop_pending_updates=True)
 
