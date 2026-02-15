@@ -7,9 +7,9 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Cont
 from pyoverkiz.client import OverkizClient
 from pyoverkiz.const import SUPPORTED_SERVERS
 
-VERSION = "8.6 (Ultra Debug Shelly)"
+VERSION = "8.7 (Shelly DNS OK - Fix NameError)"
 
-# --- CONFIG ---
+# --- CONFIGURATION ---
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 OVERKIZ_EMAIL = os.getenv("OVERKIZ_EMAIL")
 OVERKIZ_PASSWORD = os.getenv("OVERKIZ_PASSWORD")
@@ -17,76 +17,74 @@ MY_SERVER = SUPPORTED_SERVERS["atlantic_cozytouch"]
 
 SHELLY_TOKEN = os.getenv("SHELLY_TOKEN")
 SHELLY_ID = os.getenv("SHELLY_ID")
-SHELLY_SERVER = os.getenv("SHELLY_SERVER", "shelly-61-eu.shelly.cloud")
+SHELLY_SERVER = os.getenv("SHELLY_SERVER", "shelly-209-eu.shelly.cloud")
 DB_URL = os.getenv("DATABASE_URL")
 
-# --- DEBUG AU DÉMARRAGE ---
-print(f"--- INITIALISATION v{VERSION} ---")
-print(f"DEBUG ENV: SHELLY_SERVER configuré sur -> '{SHELLY_SERVER}'")
-try:
-    # Test de résolution DNS pour voir si l'adresse est connue du système
-    ip = socket.gethostbyname(SHELLY_SERVER)
-    print(f"DEBUG ENV: DNS OK! Le serveur {SHELLY_SERVER} répond à l'IP {ip}")
-except Exception as e:
-    print(f"DEBUG ENV ERREUR: Impossible de résoudre le nom '{SHELLY_SERVER}'. Erreur: {e}")
-    print("CONSEIL: Vérifiez qu'il n'y a pas d'espace, de 'https://' ou de '/' dans votre variable SHELLY_SERVER sur Koyeb.")
+ROOMS = {
+    "io://2091-1547-6688/14253355": "Salon",
+    "io://2091-1547-6688/1640746": "Chambre",
+    "io://2091-1547-6688/190387": "Bureau",
+    "io://2091-1547-6688/4326513": "Sèche-Serviette"
+}
+
+# --- INITIALISATION ---
+print(f"--- START v{VERSION} ---")
+print(f"DEBUG ENV: Serveur Shelly cible -> '{SHELLY_SERVER}'")
+
+# --- BASE DE DONNÉES ---
+def init_db():
+    if not DB_URL:
+        print("DEBUG DB: Pas de DATABASE_URL, stockage désactivé.")
+        return
+    try:
+        conn = psycopg2.connect(DB_URL)
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS temp_logs (
+                id SERIAL PRIMARY KEY,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                room TEXT,
+                temp_radiateur FLOAT,
+                temp_shelly FLOAT,
+                consigne FLOAT
+            );
+        """)
+        conn.commit()
+        cur.close()
+        conn.close()
+        print("DEBUG DB: Table temp_logs opérationnelle.")
+    except Exception as e:
+        print(f"DEBUG DB ERROR: {e}")
 
 # --- LOGIQUE SHELLY ---
-
 async def get_shelly_temp():
     if not SHELLY_TOKEN or not SHELLY_ID:
-        print("DEBUG API: Shelly Token ou ID manquant dans les variables.")
+        print("DEBUG API: Shelly non configuré.")
         return None
-        
     url = f"https://{SHELLY_SERVER}/device/status"
-    print(f"DEBUG API: Tentative d'appel Shelly sur {url}...")
-    
     try:
         async with httpx.AsyncClient() as client:
-            # On utilise un dictionnaire pour les data
-            payload = {"id": SHELLY_ID, "auth_key": SHELLY_TOKEN}
-            r = await client.post(url, data=payload, timeout=15)
-            
-            print(f"DEBUG API: Status Code = {r.status_code}")
-            
-            if r.status_code != 200:
-                print(f"DEBUG API: Erreur Réponse = {r.text}")
-                return None
-                
-            res = r.json()
-            # Navigation prudente dans le JSON
-            if 'data' in res and 'device_status' in res['data']:
-                status = res['data']['device_status']
-                # On cherche la température (peut varier selon les modèles Gen3)
-                temp = status.get('temperature:0', {}).get('tC')
-                print(f"DEBUG API: Température trouvée = {temp}°C")
-                return temp
+            r = await client.post(url, data={"id": SHELLY_ID, "auth_key": SHELLY_TOKEN}, timeout=15)
+            if r.status_code == 200:
+                res = r.json()
+                # On tente de récupérer la température (chemin standard Gen3)
+                t = res['data']['device_status']['temperature:0']['tC']
+                print(f"DEBUG API: Shelly {SHELLY_ID} = {t}°C")
+                return t
             else:
-                print(f"DEBUG API: Structure JSON inattendue = {res}")
+                print(f"DEBUG API: Erreur HTTP {r.status_code}")
                 return None
     except Exception as e:
-        print(f"DEBUG API CRASH: {type(e).__name__}: {e}")
+        print(f"DEBUG API ERROR: {e}")
         return None
 
-# --- LE RESTE DU CODE (Listing & Telegram) ---
-
+# --- LISTING ---
 async def get_detailed_listing():
-    print("DEBUG: Lancement du listing complet...")
+    print("DEBUG: Scan Overkiz en cours...")
     async with OverkizClient(OVERKIZ_EMAIL, OVERKIZ_PASSWORD, server=MY_SERVER) as client:
         await client.login()
         devices = await client.get_devices()
-        
-        # Shelly en premier pour ne pas ralentir le reste si ça timeout
         shelly_t = await get_shelly_temp()
-        
-        results = ""
-        # On définit ici les ROOMS comme avant
-        ROOMS = {
-            "io://2091-1547-6688/14253355": "Salon",
-            "io://2091-1547-6688/1640746": "Chambre",
-            "io://2091-1547-6688/190387": "Bureau",
-            "io://2091-1547-6688/4326513": "Sèche-Serviette"
-        }
         
         status_lines = []
         for d in devices:
@@ -103,21 +101,21 @@ async def get_detailed_listing():
                         diff = shelly_t - t_amb if isinstance(t_amb, (int, float)) else 0
                         line += f"\n   └ 🌡️ <b>Shelly GT3: {shelly_t}°C</b> (Δ {diff:+.1f}°C)"
                     else:
-                        line += f"\n   └ ⚠️ <i>Shelly injoignable (voir logs)</i>"
+                        line += f"\n   └ ⚠️ <i>Shelly injoignable</i>"
                 status_lines.append(line)
-        
         return "\n".join(status_lines)
 
-# --- HANDLERS ---
-
+# --- HANDLERS TELEGRAM ---
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    
     if query.data == "LIST":
-        m = await query.edit_message_text("🔍 Récupération...")
-        report = await get_detailed_listing()
-        await m.edit_text(f"🌡️ <b>ÉTAT ACTUEL</b>\n\n{report}", parse_mode='HTML', reply_markup=get_keyboard())
+        m = await query.edit_message_text("🔍 Récupération des données...")
+        try:
+            report = await get_detailed_listing()
+            await m.edit_text(f"🌡️ <b>ÉTAT ACTUEL</b>\n\n{report}", parse_mode='HTML', reply_markup=get_keyboard())
+        except Exception as e:
+            await m.edit_text(f"Erreur : {e}")
 
 def get_keyboard():
     return InlineKeyboardMarkup([
@@ -125,22 +123,21 @@ def get_keyboard():
         [InlineKeyboardButton("🏠 MAISON", callback_data="HOME"), InlineKeyboardButton("❄️ ABSENCE", callback_data="ABS_16")]
     ])
 
+# --- SERVEUR DE SANTÉ ---
 class Health(BaseHTTPRequestHandler):
-    def do_GET(self): self.send_response(200); self.end_headers(); self.wfile.write(b"OK")
+    def do_GET(self):
+        self.send_response(200); self.end_headers(); self.wfile.write(b"OK")
 
+# --- MAIN ---
 def main():
-    init_db()
+    init_db() # Cette fois elle est bien définie au dessus !
     threading.Thread(target=lambda: HTTPServer(('0.0.0.0', 8000), Health).serve_forever(), daemon=True).start()
     
     app = Application.builder().token(TOKEN).build()
-    app.add_handler(CommandHandler("start", lambda u,c: u.message.reply_text("Thermostat Actif", reply_markup=get_keyboard())))
+    app.add_handler(CommandHandler("start", lambda u,c: u.message.reply_text("Bonjour ! État du chauffage :", reply_markup=get_keyboard())))
     app.add_handler(CallbackQueryHandler(button_handler))
     
-    # Lancement du logger en arrière-plan
-    loop = asyncio.get_event_loop()
-    loop.create_task(background_logger())
-    
-    print(f"Démarrage v{VERSION}")
+    print(f"Bot v{VERSION} démarré avec succès.")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
