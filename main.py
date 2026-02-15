@@ -136,8 +136,51 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                       reply_markup=get_keyboard())
     
     elif query.data == "REPORT":
-        # (Logique rapport identique v8.9)
-        pass 
+        print("DEBUG: Clic sur Rapport 7J - Début du calcul...")
+        if not DB_URL:
+            print("DEBUG ERROR: DATABASE_URL est vide !")
+            await query.message.reply_text("Base de données non configurée.")
+            return
+            
+        try:
+            conn = psycopg2.connect(DB_URL)
+            cur = conn.cursor()
+            # On cherche les moyennes sur les 7 derniers jours pour le Bureau
+            query_sql = """
+                SELECT 
+                    AVG(temp_radiateur), 
+                    AVG(temp_shelly), 
+                    AVG(temp_shelly - temp_radiateur),
+                    COUNT(*) 
+                FROM temp_logs 
+                WHERE room = 'Bureau' 
+                AND timestamp > NOW() - INTERVAL '7 days' 
+                AND temp_shelly IS NOT NULL;
+            """
+            cur.execute(query_sql)
+            stats = cur.fetchone()
+            cur.close()
+            conn.close()
+            
+            print(f"DEBUG: Résultat SQL -> {stats}")
+
+            # stats[3] contient le nombre de lignes (COUNT)
+            if stats and stats[3] > 0:
+                msg = (f"📊 <b>BILAN 7 JOURS (Bureau)</b>\n\n"
+                       f"• Moy. Radiateur : {stats[0]:.1f}°C\n"
+                       f"• Moy. Shelly GT3 : {stats[1]:.1f}°C\n"
+                       f"• <b>Écart moyen : {stats[2]:+.1f}°C</b>\n\n"
+                       f"<i>Basé sur {stats[3]} mesures.</i>")
+                print("DEBUG: Envoi du rapport réussi.")
+            else:
+                msg = "⚠️ <b>Pas encore de données.</b>\nCliquez sur 'Actualiser' plusieurs fois pour remplir la base."
+                print("DEBUG: Pas de données en base pour le moment.")
+                
+            await query.message.reply_text(msg, parse_mode='HTML')
+            
+        except Exception as e:
+            print(f"DEBUG ERROR RAPPORT: {e}")
+            await query.message.reply_text(f"Erreur lors du calcul : {e}") 
 
 def get_keyboard():
     return InlineKeyboardMarkup([
