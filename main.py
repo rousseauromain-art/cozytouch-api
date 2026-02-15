@@ -134,7 +134,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await m.edit_text(f"<b>ÉTAT ACTUEL</b>\n\n{report}", parse_mode='HTML', reply_markup=get_keyboard())
 
 def main():
-    # Affichage immédiat dans les logs au lancement
     print(f"\n" + "="*40)
     print(f"DÉMARRAGE DU BOT v{VERSION}")
     print(f"="*40)
@@ -145,8 +144,10 @@ def main():
     app.add_handler(CommandHandler("start", lambda u,c: u.message.reply_text(f"Bot v{VERSION} prêt.", reply_markup=get_keyboard())))
     app.add_handler(CallbackQueryHandler(button_handler))
     
-    print("[BOT] Polling démarré...")
-    app.run_polling()
+    print("[BOT] Polling démarré avec suppression des conflits...")
+    
+    # AJOUT DE drop_pending_updates ICI POUR ÉVITER LES CONFLITS
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
