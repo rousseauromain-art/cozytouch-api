@@ -6,7 +6,7 @@ from pyoverkiz.client import OverkizClient
 from pyoverkiz.const import SUPPORTED_SERVERS
 from pyoverkiz.models import Command
 
-VERSION = "5.5 (Fix Dump & No Crash)"
+VERSION = "5.6 (Full Verbose Debug)"
 
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 OVERKIZ_EMAIL = os.getenv("OVERKIZ_EMAIL")
@@ -31,65 +31,68 @@ def run_web_server():
     server = HTTPServer(('0.0.0.0', 8000), KeepAliveServer)
     server.serve_forever()
 
-# --- LE SCANNEUR DE TOUS LES CHAMPS ---
-async def get_detailed_listing():
+# --- SCANNER TOTAL ---
+async def get_total_dump():
     async with OverkizClient(OVERKIZ_EMAIL, OVERKIZ_PASSWORD, server=MY_SERVER) as client:
         await client.login()
         devices = await client.get_devices()
-        res = []
         
-        print("\n" + "!"*60)
-        print("!!! DUMP DES VALEURS BRUTES DE L'API !!!")
-        
+        print("\n" + "#"*80)
+        print("### DUMP STRATOSPHÉRIQUE - TOUTES LES DONNÉES DISPONIBLES ###")
+        print("#"*80)
+
         for d in devices:
             sid = d.device_url.split('/')[-1]
             if sid in DEVICE_NAMES:
-                print(f"\n[APPAREIL: {DEVICE_NAMES[sid]} ({sid})]")
-                states_dict = {s.name: s.value for s in d.states}
+                name = DEVICE_NAMES[sid]
+                print(f"\n\n>>> APPAREIL : {name} ({sid}) <<<")
+                print(f"    Label      : {d.label}")
+                print(f"    Widget     : {d.widget}")
+                print(f"    Protocol   : {d.protocol}")
+                print(f"    CONTENU DES ETATS (STATES) :")
                 
-                # ON LOG TOUT DANS LA CONSOLE SANS EXCEPTION
-                for name, val in sorted(states_dict.items()):
-                    print(f"  {name} ===> {val}")
+                # On récupère tous les états, même ceux qui n'ont pas de valeur
+                try:
+                    sorted_states = sorted(d.states, key=lambda x: x.name)
+                    for s in sorted_states:
+                        # Affichage du nom, de la valeur et du type
+                        print(f"      [STATE] {s.name:45} | Valeur: {s.value} (Type: {type(s.value).__name__})")
+                except Exception as e:
+                    print(f"      [!] Erreur lecture states: {e}")
 
-                # Construction du message Telegram simplifié pour le test
-                target = states_dict.get("io:EffectiveTemperatureSetpointState", "?")
-                
-                # On essaie d'afficher ce qu'on peut en attendant ton retour logs
-                ambient = states_dict.get("core:TemperatureState", "Inconnu")
-                
-                line = f"<b>{DEVICE_NAMES[sid]}</b>\n"
-                line += f"└ Consigne: {target}°C\n"
-                line += f"└ Champ 'core:TemperatureState': {ambient}"
-                res.append(line)
-        
-        print("\n" + "!"*60 + "\n")
-        return "\n\n".join(res)
+                # On cherche aussi dans les capteurs liés (sensors) si existants
+                if hasattr(d, 'sensors') and d.sensors:
+                    print(f"    CAPTEURS LIES :")
+                    for sensor in d.sensors:
+                        print(f"      [SENSOR] {sensor}")
+
+        print("\n" + "#"*80 + "\n")
+        return "Dump terminé dans les logs Koyeb."
 
 # --- BOT HANDLERS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    kb = [[InlineKeyboardButton("🔍 SCAN COMPLET", callback_data="LIST")]]
-    await update.message.reply_text("Mode Analyse v5.5", reply_markup=InlineKeyboardMarkup(kb))
+    kb = [[InlineKeyboardButton("🚀 LANCER LE DUMP TOTAL", callback_data="DUMP")]]
+    await update.message.reply_text(f"Diagnostic Atlantic v{VERSION}", reply_markup=InlineKeyboardMarkup(kb))
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    await query.edit_message_text("⏳ Scan en cours... Regarde tes logs Koyeb !")
     
-    report = await get_detailed_listing()
+    await query.edit_message_text("🔄 Extraction en cours... Patience...")
     
-    await query.edit_message_text(f"<b>RÉSULTATS</b>\n\n{report}", parse_mode='HTML')
-    await context.bot.send_message(
-        chat_id=query.message.chat_id, 
-        text="Menu :", 
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔍 NOUVEAU SCAN", callback_data="LIST")]])
-    )
+    try:
+        await get_total_dump()
+        await query.edit_message_text("✅ Dump envoyé dans les logs Koyeb !\n\nVa voir la console Koyeb pour trouver tes températures.")
+    except Exception as e:
+        print(f"CRASH DUMP: {e}")
+        await query.edit_message_text(f"❌ Erreur lors du dump : {e}")
 
 def main():
     threading.Thread(target=run_web_server, daemon=True).start()
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
-    print(f"=== SCANNER READY v{VERSION} ===")
+    print(f"=== READY v{VERSION} ===")
     app.run_polling()
 
 if __name__ == "__main__":
