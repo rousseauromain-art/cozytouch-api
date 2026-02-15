@@ -1,6 +1,4 @@
-import os
-import asyncio
-import threading
+import os, asyncio, threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
@@ -8,7 +6,7 @@ from pyoverkiz.client import OverkizClient
 from pyoverkiz.const import SUPPORTED_SERVERS
 from pyoverkiz.models import Command
 
-VERSION = "5.3 (Full API Dump)"
+VERSION = "5.5 (Fix Dump & No Crash)"
 
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 OVERKIZ_EMAIL = os.getenv("OVERKIZ_EMAIL")
@@ -22,13 +20,6 @@ DEVICE_NAMES = {
     "4326513#1": "Sèche-Serviette"
 }
 
-CONFORT_TEMPS = {
-    "14253355#1": 19.5,
-    "1640746#1": 19.0,
-    "190387#1": 19.0,
-    "4326513#1": 19.5
-}
-
 # --- KEEP ALIVE KOYEB ---
 class KeepAliveServer(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -40,113 +31,65 @@ def run_web_server():
     server = HTTPServer(('0.0.0.0', 8000), KeepAliveServer)
     server.serve_forever()
 
-# --- ANALYSEUR DE CHAMPS ---
-async def dump_all_states():
-    async with OverkizClient(OVERKIZ_EMAIL, OVERKIZ_PASSWORD, server=MY_SERVER) as client:
-        await client.login()
-        devices = await client.get_devices()
-        
-        print("\n" + "!"*60)
-        print("!!! DUMP COMPLET DES DONNÉES API !!!")
-        print("!"*60)
-
-        for d in devices:
-            sid = d.device_url.split('/')[-1]
-            if sid in DEVICE_NAMES:
-                print(f"\n[APPAREIL: {DEVICE_NAMES[sid]} | URL: {d.device_url}]")
-                print(f"Widget: {d.widget} | UI: {d.ui_widget}")
-                
-                # On trie par nom pour s'y retrouver
-                sorted_states = sorted(d.states, key=lambda s: s.name)
-                for state in sorted_states:
-                    # On affiche le nom et la valeur brute
-                    print(f"  > {state.name}: {state.value}")
-        
-        print("\n" + "!"*60 + "\n")
-
-# --- LOGIQUE PRINCIPALE ---
+# --- LE SCANNEUR DE TOUS LES CHAMPS ---
 async def get_detailed_listing():
-    # On lance le dump dans les logs à chaque fois qu'on demande le listing
-    await dump_all_states()
-    
     async with OverkizClient(OVERKIZ_EMAIL, OVERKIZ_PASSWORD, server=MY_SERVER) as client:
         await client.login()
         devices = await client.get_devices()
         res = []
+        
+        print("\n" + "!"*60)
+        print("!!! DUMP DES VALEURS BRUTES DE L'API !!!")
+        
         for d in devices:
             sid = d.device_url.split('/')[-1]
             if sid in DEVICE_NAMES:
-                s = {state.name: state.value for state in d.states}
+                print(f"\n[APPAREIL: {DEVICE_NAMES[sid]} ({sid})]")
+                states_dict = {s.name: s.value for s in d.states}
                 
-                # On garde tes champs identifiés
-                target = s.get("io:EffectiveTemperatureSetpointState", "?")
+                # ON LOG TOUT DANS LA CONSOLE SANS EXCEPTION
+                for name, val in sorted(states_dict.items()):
+                    print(f"  {name} ===> {val}")
+
+                # Construction du message Telegram simplifié pour le test
+                target = states_dict.get("io:EffectiveTemperatureSetpointState", "?")
                 
-                # Tentative large pour la mesure en attendant ton retour sur les logs
-                ambient = s.get("core:TemperatureState") or \
-                          s.get("io:TargetHeatingLevelState") or \
-                          s.get("core:LuminanceState") # Parfois détourné ?
+                # On essaie d'afficher ce qu'on peut en attendant ton retour logs
+                ambient = states_dict.get("core:TemperatureState", "Inconnu")
                 
-                ambient_display = f"{round(ambient, 1)}°C" if isinstance(ambient, (int, float)) else "???"
-                rate = s.get("io:CurrentWorkingRateState", 0)
-                icon = "♨️" if (isinstance(rate, (int, float)) and rate > 0) else "⚪"
-                
-                line = f"<b>{DEVICE_NAMES[sid]}</b> {icon}\n"
-                line += f"└ Consigne: <b>{target}°C</b> | Mesuré: {ambient_display}"
+                line = f"<b>{DEVICE_NAMES[sid]}</b>\n"
+                line += f"└ Consigne: {target}°C\n"
+                line += f"└ Champ 'core:TemperatureState': {ambient}"
                 res.append(line)
+        
+        print("\n" + "!"*60 + "\n")
         return "\n\n".join(res)
 
-async def apply_heating_mode(target_mode, custom_temp=None):
-    async with OverkizClient(OVERKIZ_EMAIL, OVERKIZ_PASSWORD, server=MY_SERVER) as client:
-        await client.login()
-        devices = await client.get_devices()
-        for d in devices:
-            sid = d.device_url.split('/')[-1]
-            if sid in DEVICE_NAMES:
-                is_towel = "Towel" in d.widget
-                mode_cmd = "setTowelDryerOperatingMode" if is_towel else "setOperatingMode"
-                manuel_val = "external" if is_towel else "basic"
-                val = custom_temp if custom_temp else 16.0
-                if target_mode == "HOME": val = CONFORT_TEMPS[sid]
-                
-                try:
-                    cmds = [
-                        Command(name="setTargetTemperature", parameters=[val]),
-                        Command(name=mode_cmd, parameters=["internal" if target_mode == "HOME" else manuel_val])
-                    ]
-                    await client.execute_commands(d.device_url, cmds)
-                except: pass
-        await asyncio.sleep(12)
-
-# --- BOT INTERFACE ---
-def get_main_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🏠 MAISON (Confort)", callback_data="HOME")],
-        [InlineKeyboardButton("❄️ ABSENCE (16°C)", callback_data="ABS_16")],
-        [InlineKeyboardButton("🔍 ÉTAT ACTUEL", callback_data="LIST")]
-    ])
-
+# --- BOT HANDLERS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(f"<b>PILOTAGE v{VERSION}</b>", parse_mode='HTML', reply_markup=get_main_keyboard())
+    kb = [[InlineKeyboardButton("🔍 SCAN COMPLET", callback_data="LIST")]]
+    await update.message.reply_text("Mode Analyse v5.5", reply_markup=InlineKeyboardMarkup(kb))
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    await query.edit_message_text("⏳ Scan en cours (Regarde les logs Koyeb)...")
-
-    if query.data != "LIST":
-        t = 16.0 if "ABS" in query.data else None
-        await apply_heating_mode("HOME" if query.data == "HOME" else "ABSENCE", custom_temp=t)
-
+    await query.edit_message_text("⏳ Scan en cours... Regarde tes logs Koyeb !")
+    
     report = await get_detailed_listing()
-    await query.edit_message_text(f"<b>ÉTAT DES RADIATEURS</b>\n\n{report}\n\n---", parse_mode='HTML')
-    await context.bot.send_message(chat_id=query.message.chat_id, text="<b>Menu :</b>", parse_mode='HTML', reply_markup=get_main_keyboard())
+    
+    await query.edit_message_text(f"<b>RÉSULTATS</b>\n\n{report}", parse_mode='HTML')
+    await context.bot.send_message(
+        chat_id=query.message.chat_id, 
+        text="Menu :", 
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔍 NOUVEAU SCAN", callback_data="LIST")]])
+    )
 
 def main():
     threading.Thread(target=run_web_server, daemon=True).start()
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
-    print(f"=== READY v{VERSION} ===")
+    print(f"=== SCANNER READY v{VERSION} ===")
     app.run_polling()
 
 if __name__ == "__main__":
