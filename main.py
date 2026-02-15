@@ -1,7 +1,4 @@
-import os, asyncio, threading, sys, time
-import httpx
-import psycopg2
-from datetime import datetime
+import os, asyncio, threading, sys, time, httpx, psycopg2
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
@@ -10,7 +7,7 @@ from pyoverkiz.client import OverkizClient
 from pyoverkiz.const import SUPPORTED_SERVERS
 from pyoverkiz.models import Command
 
-VERSION = "9.11 (Fix Action OperatingMode)"
+VERSION = "9.13 (Code validé hier)"
 
 # --- CONFIG ---
 TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -29,7 +26,6 @@ ROOMS = {
     "io://2091-1547-6688/4326513": "Sèche-Serviette"
 }
 
-# --- INITIALISATION DB ---
 def init_db():
     if not DB_URL: return
     try:
@@ -47,51 +43,27 @@ async def get_shelly_temp():
             return r.json()['data']['device_status']['temperature:0']['tC']
     except: return None
 
-# --- TON CODE ACTION QUI MARCHE (Restauré) ---
-async def apply_heating_mode(target_mode):
+# --- LA LOGIQUE QUI A MARCHÉ HIER ---
+async def apply_heating_temp(target_temp):
+    print(f"DEBUG: [ACTION] Passage à {target_temp}°C")
     async with OverkizClient(OVERKIZ_EMAIL, OVERKIZ_PASSWORD, server=MY_SERVER) as client:
-        try:
-            await client.login()
-            print(f"\n>>> DÉBUT SESSION - ACTION: {target_mode} <<<")
-            devices = await client.get_devices()
-            
-            temps = {}
-            for d in devices:
-                if "core:TemperatureState" in [s.name for s in d.states]:
-                    root_id = d.device_url.split('/')[-1].split('#')[0]
-                    state = next((s for s in d.states if s.name == "core:TemperatureState"), None)
-                    if state and state.value is not None:
-                        temps[root_id] = state.value
-                        print(f"DEBUG TEMP: {root_id} mesure {state.value}°C")
+        await client.login()
+        devices = await client.get_devices()
+        count = 0
+        for d in devices:
+            base_url = d.device_url.split('#')[0]
+            if base_url in ROOMS:
+                # Hier, on a vu que seuls les #1 acceptent la consigne
+                if d.device_url.endswith("#1"):
+                    try:
+                        print(f"DEBUG: [ACTION] Envoi {target_temp} vers {ROOMS[base_url]}")
+                        await client.execute_command(d.device_url, Command("setTargetTemperature", [target_temp]))
+                        count += 1
+                    except Exception as e:
+                        print(f"DEBUG: [ACTION ERR] {ROOMS[base_url]}: {e}")
+        return count
 
-            results = []
-            for d in devices:
-                if d.widget in ["AtlanticElectricalHeaterWithAdjustableTemperatureSetpoint", "AtlanticElectricalTowelDryer"]:
-                    short_id = d.device_url.split('/')[-1]
-                    root_id = short_id.split('#')[0]
-                    status = ""
-                    if target_mode in ["HOME", "ABSENCE"]:
-                        try:
-                            cmd_val = "away" if target_mode == "ABSENCE" else "basic"
-                            print(f"TENTATIVE: {d.label} ({short_id}) -> {cmd_val}")
-                            await client.execute_command(d.device_url, Command("setOperatingMode", [cmd_val]))
-                            print(f"RETOUR: Succès pour {short_id}")
-                            status = " | ✅ OK"
-                        except Exception as e:
-                            print(f"ERREUR sur {short_id}: {e}")
-                            status = " | ❌ Erreur"
-
-                    current_temp = temps.get(root_id, "??")
-                    t_str = f"{round(current_temp, 1)}°C" if isinstance(current_temp, (int, float)) else "??"
-                    results.append(f"<b>{d.label}</b> ({short_id})\n└ Temp: {t_str}{status}")
-
-            print(f">>> FIN SESSION - {len(results)} appareils traités <<<\n")
-            return "\n\n".join(results)
-        except Exception as e:
-            print(f"ERREUR CRITIQUE: {e}")
-            return f"Erreur : {str(e)}"
-
-# --- ENREGISTREMENT BDD ---
+# --- SCAN & ENREGISTREMENT ---
 async def perform_record(label="AUTO"):
     print(f"DEBUG: [{label}] Scan...")
     try:
@@ -116,12 +88,13 @@ async def perform_record(label="AUTO"):
                     cur.execute("INSERT INTO temp_logs (room, temp_radiateur, temp_shelly, consigne) VALUES (%s, %s, %s, %s)",
                                (room, vals["temp"], (shelly_t if room=="Bureau" else None), vals["target"]))
             conn.commit(); cur.close(); conn.close()
+            print(f"DEBUG: [{label}] Enregistré.")
             return data_map, shelly_t
     except Exception as e:
         print(f"DEBUG: [{label} ERR] {e}")
         return None, None
 
-# --- TELEGRAM HANDLERS ---
+# --- HANDLERS ---
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -131,28 +104,27 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if data_map:
             lines = [f"📍 {r}: <b>{v['temp']}°C</b> (Cible: <b>{v['target']}°C</b>)" for r,v in data_map.items()]
             if shelly_t: lines.append(f"   └ 🌡️ Shelly: <b>{shelly_t}°C</b>")
-            txt = "\n".join(lines)
-            try: await query.edit_message_text(f"🌡️ <b>ÉTAT DU CHAUFFAGE</b>\n\n{txt}", parse_mode='HTML', reply_markup=get_keyboard())
+            try: await query.edit_message_text(f"🌡️ <b>ÉTAT</b>\n\n" + "\n".join(lines), parse_mode='HTML', reply_markup=get_keyboard())
             except: pass
+
+    elif query.data in ["HOME", "ABS_16"]:
+        target = 21 if query.data == "HOME" else 16
+        m = await query.edit_message_text(f"⏳ Application {target}°C...")
+        count = await apply_heating_temp(target)
+        await m.edit_text(f"✅ Terminé : {count} appareils mis à {target}°C.", reply_markup=get_keyboard())
 
     elif query.data == "REPORT":
         conn = psycopg2.connect(DB_URL); cur = conn.cursor()
         cur.execute("SELECT AVG(temp_radiateur), AVG(temp_shelly), AVG(temp_shelly - temp_radiateur), COUNT(*) FROM temp_logs WHERE room = 'Bureau' AND timestamp > NOW() - INTERVAL '7 days' AND temp_shelly IS NOT NULL;")
         s = cur.fetchone(); cur.close(); conn.close()
-        msg = f"📊 <b>BILAN 7J</b>\nRad: {s[0]:.1f}°C / Shelly: {s[1]:.1f}°C\n<b>Δ: {s[2]:+.1f}°C</b>\n\n<i>{s[3]} mesures.</i>" if s and s[3]>0 else "⚠️ Pas de données."
+        msg = f"📊 <b>BILAN 7J</b>\nRad: {s[0]:.1f}°C / Shelly: {s[1]:.1f}°C\n<b>Δ: {s[2]:+.1f}°C</b>\n\n<i>{s[3]} mesures en BDD.</i>" if s and s[3]>0 else "⚠️ Pas de données."
         await query.message.reply_text(msg, parse_mode='HTML')
 
-    elif query.data in ["HOME", "ABS_16"]:
-        mode_label = "ABSENCE" if query.data == "ABS_16" else "HOME"
-        m = await query.edit_message_text(f"⏳ Mode {mode_label}...")
-        report = await apply_heating_mode(mode_label)
-        await m.edit_text(f"✅ <b>RÉSULTAT {mode_label}</b>\n\n{report}", parse_mode='HTML', reply_markup=get_keyboard())
-
 def get_keyboard():
-    return InlineKeyboardMarkup([[InlineKeyboardButton("🔍 ACTUALISER", callback_data="LIST")],[InlineKeyboardButton("🏠 MAISON", callback_data="HOME"), InlineKeyboardButton("❄️ ABSENCE", callback_data="ABS_16")],[InlineKeyboardButton("📊 RAPPORT 7J", callback_data="REPORT")]])
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🔍 ACTUALISER", callback_data="LIST")],[InlineKeyboardButton("🏠 MAISON (21°)", callback_data="HOME"), InlineKeyboardButton("❄️ ABSENCE (16°)", callback_data="ABS_16")],[InlineKeyboardButton("📊 RAPPORT 7J", callback_data="REPORT")]])
 
 async def background_logger():
-    await asyncio.sleep(5)
+    await asyncio.sleep(10)
     while True:
         await perform_record("AUTO")
         await asyncio.sleep(3600)
@@ -164,7 +136,7 @@ def main():
     init_db()
     threading.Thread(target=lambda: HTTPServer(('0.0.0.0', 8000), Health).serve_forever(), daemon=True).start()
     app = Application.builder().token(TOKEN).build()
-    app.add_handler(CommandHandler("start", lambda u,c: u.message.reply_text(f"🚀 Thermostat (v{VERSION})", reply_markup=get_keyboard())))
+    app.add_handler(CommandHandler("start", lambda u,c: u.message.reply_text("🚀 Thermostat v9.13", reply_markup=get_keyboard())))
     app.add_handler(CallbackQueryHandler(button_handler))
     loop = asyncio.get_event_loop()
     loop.create_task(background_logger())
