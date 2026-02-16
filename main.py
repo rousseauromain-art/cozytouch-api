@@ -6,7 +6,7 @@ from pyoverkiz.client import OverkizClient
 from pyoverkiz.const import SUPPORTED_SERVERS
 from pyoverkiz.models import Command
 
-VERSION = "9.17 (Direct Command + Stats)"
+VERSION = "9.18 (Clean UI & Fast Command)"
 
 # --- CONFIG ---
 TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -18,15 +18,14 @@ SHELLY_ID = os.getenv("SHELLY_ID")
 SHELLY_SERVER = os.getenv("SHELLY_SERVER", "shelly-209-eu.shelly.cloud")
 DB_URL = os.getenv("DATABASE_URL")
 
-CONFORT_TEMPS = {"14253355#1": 19.5, "1640746#1": 19.0, "190387#1": 19.0, "4326513#1": 19.5}
-ROOMS = {
-    "io://2091-1547-6688/14253355": "Salon",
-    "io://2091-1547-6688/1640746": "Chambre",
-    "io://2091-1547-6688/190387": "Bureau",
-    "io://2091-1547-6688/4326513": "Sèche-Serviette"
+# Configuration fixe des pièces et consignes
+ROOMS_CONFIG = {
+    "14253355#1": {"name": "Salon", "confort": 19.5},
+    "1640746#1": {"name": "Chambre", "confort": 19.0},
+    "190387#1": {"name": "Bureau", "confort": 19.0},
+    "4326513#1": {"name": "Sèche-Serviette", "confort": 19.5}
 }
 
-# --- BASE DE DONNÉES ---
 def init_db():
     if not DB_URL: return
     try:
@@ -43,7 +42,7 @@ async def get_shelly_temp():
             return r.json()['data']['device_status']['temperature:0']['tC']
     except: return None
 
-# --- COMMANDES (SANS TIMER) ---
+# --- ACTIONS RAPIDES ---
 async def apply_heating_mode(target_mode):
     async with OverkizClient(OVERKIZ_EMAIL, OVERKIZ_PASSWORD, server=MY_SERVER) as client:
         await client.login()
@@ -51,52 +50,54 @@ async def apply_heating_mode(target_mode):
         results = []
         for d in devices:
             short_id = d.device_url.split('/')[-1]
-            if short_id in CONFORT_TEMPS:
+            if short_id in ROOMS_CONFIG:
+                conf = ROOMS_CONFIG[short_id]
                 mode_cmd = "setOperatingMode" if "Heater" in d.widget else "setTowelDryerOperatingMode"
-                mode_val = ("internal" if target_mode == "HOME" else ("basic" if "Heater" in d.widget else "external"))
-                temp_val = CONFORT_TEMPS[short_id] if target_mode == "HOME" else 16.0
+                mode_val = "internal" if target_mode == "HOME" else ("basic" if "Heater" in d.widget else "external")
+                temp_val = conf["confort"] if target_mode == "HOME" else 16.0
                 try:
                     await client.execute_commands(d.device_url, [
                         Command(name="setTargetTemperature", parameters=[temp_val]),
                         Command(name=mode_cmd, parameters=[mode_val])
                     ])
-                    results.append(f"✅ {d.label} -> {temp_val}°C")
-                except: results.append(f"❌ {d.label} (Erreur)")
+                    results.append(f"✅ <b>{conf['name']}</b> réglé sur {temp_val}°C")
+                except:
+                    results.append(f"❌ <b>{conf['name']}</b> (Erreur)")
         return "\n".join(results)
 
-# --- SCAN AUTO & STATS ---
+# --- SCAN AUTO & LOGGING ---
 async def perform_record():
     try:
         async with OverkizClient(OVERKIZ_EMAIL, OVERKIZ_PASSWORD, server=MY_SERVER) as client:
             await client.login()
             devices = await client.get_devices()
             shelly_t = await get_shelly_temp()
-            data_map = {name: {"temp": None, "target": None} for name in ROOMS.values()}
-            for d in devices:
-                base_url = d.device_url.split('#')[0]
-                if base_url in ROOMS:
-                    room = ROOMS[base_url]
-                    states = {s.name: s.value for s in d.states}
-                    data_map[room]["temp"] = states.get("core:TemperatureState")
-                    data_map[room]["target"] = states.get("io:EffectiveTemperatureSetpointState") or states.get("core:TargetTemperatureState")
             
             conn = psycopg2.connect(DB_URL); cur = conn.cursor()
-            for room, vals in data_map.items():
-                if vals["temp"] is not None:
-                    cur.execute("INSERT INTO temp_logs (room, temp_radiateur, temp_shelly, consigne) VALUES (%s, %s, %s, %s)",
-                               (room, vals["temp"], (shelly_t if room=="Bureau" else None), vals["target"]))
+            for d in devices:
+                short_id = d.device_url.split('/')[-1]
+                if short_id in ROOMS_CONFIG:
+                    states = {s.name: s.value for s in d.states}
+                    room_name = ROOMS_CONFIG[short_id]["name"]
+                    temp_rad = states.get("core:TemperatureState")
+                    consigne = states.get("io:EffectiveTemperatureSetpointState") or states.get("core:TargetTemperatureState")
+                    
+                    if temp_rad is not None:
+                        cur.execute("INSERT INTO temp_logs (room, temp_radiateur, temp_shelly, consigne) VALUES (%s, %s, %s, %s)",
+                                   (room_name, temp_rad, (shelly_t if room_name=="Bureau" else None), consigne))
             conn.commit(); cur.close(); conn.close()
     except Exception as e: print(f"SCAN ERR: {e}")
 
-# --- HANDLERS ---
+# --- INTERFACE TELEGRAM ---
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
     if query.data in ["HOME", "ABSENCE"]:
-        m = await query.edit_message_text(f"⏳ Envoi des commandes {query.data}...")
+        # Message d'attente bref
+        await query.edit_message_text(f"⏳ Application du mode {query.data}...")
         report = await apply_heating_mode(query.data)
-        await m.edit_text(f"<b>RÉSULTAT</b>\n\n{report}", parse_mode='HTML', reply_markup=get_keyboard())
+        await query.edit_message_text(f"<b>RÉSULTAT {query.data}</b>\n\n{report}", parse_mode='HTML', reply_markup=get_keyboard())
     
     elif query.data == "LIST":
         await query.edit_message_text("🔍 Lecture en cours...")
@@ -106,18 +107,20 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             shelly_t = await get_shelly_temp()
             lines = []
             for d in devices:
-                base_url = d.device_url.split('#')[0]
-                if base_url in ROOMS:
+                short_id = d.device_url.split('/')[-1]
+                if short_id in ROOMS_CONFIG:
                     states = {s.name: s.value for s in d.states}
-                    lines.append(f"📍 {ROOMS[base_url]}: <b>{states.get('core:TemperatureState')}°C</b> (Cible: {states.get('core:TargetTemperatureState')}°C)")
-            if shelly_t: lines.append(f"🌡️ Shelly: <b>{shelly_t}°C</b>")
-            await query.edit_message_text("\n".join(lines), parse_mode='HTML', reply_markup=get_keyboard())
+                    t = states.get("core:TemperatureState")
+                    c = states.get("core:TargetTemperatureState")
+                    lines.append(f"📍 <b>{ROOMS_CONFIG[short_id]['name']}</b>: {t}°C (Cible: {c}°C)")
+            if shelly_t: lines.append(f"\n🌡️ <b>Shelly (Bureau)</b>: {shelly_t}°C")
+            await query.edit_message_text("🌡️ <b>ÉTAT ACTUEL</b>\n\n" + "\n".join(lines), parse_mode='HTML', reply_markup=get_keyboard())
 
     elif query.data == "REPORT":
         conn = psycopg2.connect(DB_URL); cur = conn.cursor()
         cur.execute("SELECT AVG(temp_radiateur), AVG(temp_shelly), AVG(temp_shelly - temp_radiateur), COUNT(*) FROM temp_logs WHERE room = 'Bureau' AND timestamp > NOW() - INTERVAL '7 days' AND temp_shelly IS NOT NULL;")
         s = cur.fetchone(); cur.close(); conn.close()
-        msg = f"📊 <b>BILAN 7J (Bureau)</b>\nRad: {s[0]:.1f}°C / Shelly: {s[1]:.1f}°C\n<b>Δ: {s[2]:+.1f}°C</b>\n<i>{s[3]} mesures.</i>" if s and s[3]>0 else "⚠️ Pas de données."
+        msg = f"📊 <b>BILAN 7J (Bureau)</b>\nRad: {s[0]:.1f}°C / Shelly: {s[1]:.1f}°C\n<b>Δ: {s[2]:+.1f}°C</b>\n\n<i>Données sur {s[3]} points.</i>" if s and s[3]>0 else "⚠️ Pas de données."
         await query.message.reply_text(msg, parse_mode='HTML')
 
 def get_keyboard():
