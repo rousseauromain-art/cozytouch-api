@@ -15,6 +15,55 @@ Le conflit de Mode : Envoyer une consigne (setTargetTemperature) ne suffit pas s
 
 Le multiplexage des composants : Chaque radiateur est une URL type io://xxxx/yyyy#1. Le #1 est le composant de chauffe, mais les sondes peuvent être sur le #0. Notre script itère sur les composants pour agréger la donnée.
 
+# 🌀 CozyControl-Bot : Pilotage Thermique & Analyse de Data (v9.22)
+
+Ce projet est un orchestrateur Python asynchrone conçu pour piloter des radiateurs **Atlantic Oniris (IO Homecontrol)** via l'API **Cozytouch (Overkiz)** et monitorer la précision thermique via des sondes **Shelly Cloud**.
+
+## 🏗️ Architecture & Flux de Données
+
+Le système est déployé sur **Koyeb** (Micro-services) et repose sur une boucle d'événements `asyncio`.
+
+
+### 1. Stack Technique
+* **Runtime :** Python 3.10+
+* **Interface :** `python-telegram-bot` (Polling)
+* **Persistence :** PostgreSQL (Historique des températures)
+* **Clients API :** * `pyoverkiz` (Reverse-engineering du protocole IO Homecontrol)
+    * `httpx` (Consommation API REST Shelly)
+
+---
+
+## 🛠️ Le Défi du Reverse Engineering (Focus Atlantic)
+
+L'un des points majeurs du projet a été le "dumping" des capacités des appareils Atlantic pour comprendre leurs machines à états. Contrairement à des thermostats ON/OFF, les Oniris et Sèche-serviettes possèdent des registres de commandes spécifiques.
+
+### A. Identification des Commandes via Debug
+Grâce à l'introspection d'objets `pyoverkiz`, nous avons extrait les commandes atomiques :
+
+| Type Équipement | Commande de Mode | Valeur Maison (Auto) | Valeur Absence (Manu) |
+| :--- | :--- | :--- | :--- |
+| **Radiateur Oniris** | `setOperatingMode` | `internal` | `basic` |
+| **Sèche-Serviette** | `setTowelDryerOperatingMode` | `internal` | `external` |
+
+### B. Injection des Consignes (Setpoint)
+Le pilotage utilise la commande `setTargetTemperature`. 
+* **Atomicité :** Pour éviter les désynchronisations, le script utilise `execute_commands(url, [Command1, Command2])`. Cela garantit que la consigne et le changement de mode sont traités dans la même transaction par le bridge Cozytouch.
+* **Typage :** L'API Overkiz est sensible au typage ; nous forçons des `float` (ex: `16.0` et non `16`) pour éviter les erreurs `400 Bad Request`.
+
+---
+
+## 📊 Monitoring & Data Logging
+
+Le script ne se contente pas d'exécuter des ordres, il agit comme un **Data Logger** :
+
+1. **Background Worker :** Une tâche `asyncio` tourne en 24/7 et effectue un snapshot horaire.
+2. **Normalisation :** Il agrège les données de la sonde interne Atlantic (souvent biaisée car proche du corps de chauffe) et de la sonde de référence Shelly (placée au centre du bureau).
+3. **Analyse SQL :** Le rapport "Stats 7J" exécute une agrégation pour calculer le **Delta moyen**.
+   ```sql
+   SELECT AVG(temp_shelly - temp_radiateur) FROM temp_logs 
+   WHERE room = 'Bureau' AND timestamp > NOW() - INTERVAL '7 days';
+
+   
 🏗️ Architecture & Flux de Données
 Le système repose sur une boucle d'événements asyncio tournant sur Koyeb.
 
