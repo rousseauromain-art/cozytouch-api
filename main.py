@@ -119,4 +119,23 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def get_keyboard():
     return InlineKeyboardMarkup([[InlineKeyboardButton("🏠 MAISON", callback_data="HOME"), InlineKeyboardButton("❄️ ABSENCE", callback_data="ABSENCE")],[InlineKeyboardButton("🔍 ÉTAT", callback_data="LIST"), InlineKeyboardButton("📊 STATS 7J", callback_data="REPORT")]])
 
-async def background_logger
+async def background_logger():
+    while True:
+        await perform_record()
+        await asyncio.sleep(3600)
+
+class Health(BaseHTTPRequestHandler):
+    def do_GET(self): self.send_response(200); self.end_headers(); self.wfile.write(b"OK")
+
+def main():
+    init_db()
+    threading.Thread(target=lambda: HTTPServer(('0.0.0.0', 8000), Health).serve_forever(), daemon=True).start()
+    app = Application.builder().token(TOKEN).build()
+    app.add_handler(CommandHandler("start", lambda u,c: u.message.reply_text(f"🚀 Pilotage v{VERSION}", reply_markup=get_keyboard())))
+    app.add_handler(CallbackQueryHandler(button_handler))
+    loop = asyncio.get_event_loop()
+    loop.create_task(background_logger())
+    app.run_polling(drop_pending_updates=True)
+
+if __name__ == "__main__":
+    main()
