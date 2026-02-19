@@ -97,39 +97,44 @@ async def apply_heating_mode(target_mode):
         return "\n".join(results)
         
 async def bec_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Scan complet du compte BEC avec logs détaillés sur Koyeb"""
-    if not BEC_EMAIL or not BEC_PASSWORD:
-        await update.message.reply_text("❌ Erreur : BEC_EMAIL ou BEC_PASSWORD non configurés.")
-        return
-
-    await update.message.reply_text("🚀 Scan du compte BEC lancé. Vérifie les logs Koyeb !")
-    print("\n--- 🔎 DÉBUT DU SCAN BEC COMPLET ---")
-
-    try:
-        async with OverkizClient(BEC_EMAIL, BEC_PASSWORD, server=SERVER_SAUTER) as client:
-            await client.login()
-            devices = await client.get_devices()
+    # L'URL officielle du endpoint Sauter
+    AUTH_URL = "https://kiz-api.overkiz.com/externalapi/rest/login"
+    
+    async with httpx.AsyncClient() as client:
+        print(f"尝试 (Tentative) de connexion pour : {EMAIL}")
+        
+        # 1. AUTHENTIFICATION
+        try:
+            # On envoie les credentials comme le ferait l'app Sauter
+            r = await client.post(AUTH_URL, data={"userId": EMAIL, "userPassword": PASSWORD}, timeout=10)
             
-            for d in devices:
-                # Log ultra-détaillé dans Koyeb
-                print(f"\n📦 DISPOSITIF : {d.label}")
-                print(f"   Widget: {d.widget} | UI Class: {d.ui_class}")
-                print(f"   URL: {d.device_url}")
-                
-                print("   --- STATES (États) ---")
-                for s in d.states:
-                    print(f"   [STATE] {s.name}: {s.value}")
-                
-                print("   --- COMMANDS (Commandes) ---")
-                for c in d.definition.commands:
-                    print(f"   [CMD] {c.command_name} (Params: {c.n_args})")
-            
-            print("\n--- ✅ FIN DU SCAN BEC ---")
-            await update.message.reply_text(f"✅ Scan terminé. {len(devices)} objets analysés dans les logs.")
+            if r.status_code != 200:
+                print(f"❌ Erreur Auth: {r.status_code}")
+                print(f"Réponse: {r.text}")
+                return
 
-    except Exception as e:
-        print(f"❌ ERREUR SCAN BEC : {str(e)}")
-        await update.message.reply_text(f"❌ Erreur lors du scan : {e}")
+            # On récupère le cookie de session (JSESSIONID)
+            print("✅ Authentification réussie !")
+            
+            # 2. RÉCUPÉRATION DES DEVICES
+            print("🔍 Récupération des équipements...")
+            r_devices = await client.get("https://kiz-api.overkiz.com/externalapi/rest/setup/devices", timeout=10)
+            
+            if r_devices.status_code == 200:
+                devices = r_devices.json()
+                print(f"Found {len(devices)} devices.")
+                for d in devices:
+                    print(f"\n--- NOM : {d.get('label')} ---")
+                    print(f"URL: {d.get('deviceURL')}")
+                    print(f"Widget: {d.get('widget')}")
+                    # On affiche les états pour trouver la conso
+                    for state in d.get('states', []):
+                        print(f"  [STATE] {state['name']}: {state['value']}")
+            else:
+                print(f"❌ Erreur lecture devices: {r_devices.status_code}")
+
+        except Exception as e:
+            print(f"💥 Erreur Critique: {str(e)}")
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
