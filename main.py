@@ -17,6 +17,8 @@ SHELLY_TOKEN = os.getenv("SHELLY_TOKEN")
 SHELLY_ID = os.getenv("SHELLY_ID")
 SHELLY_SERVER = os.getenv("SHELLY_SERVER", "shelly-209-eu.shelly.cloud")
 DB_URL = os.getenv("DATABASE_URL")
+BEC_EMAIL = os.getenv("BEC_EMAIL")
+BEC_PASSWORD = os.getenv("BEC_PASSWORD")
 
 CONFORT_VALS = {
     "14253355#1": {"name": "Salon", "temp": 19.5},
@@ -92,6 +94,41 @@ async def apply_heating_mode(target_mode):
                     results.append(f"✅ <b>{info['name']}</b> : {t_val}°C")
                 except: results.append(f"❌ <b>{info['name']}</b> : Erreur")
         return "\n".join(results)
+        
+async def bec_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Scan complet du compte BEC avec logs détaillés sur Koyeb"""
+    if not BEC_EMAIL or not BEC_PASSWORD:
+        await update.message.reply_text("❌ Erreur : BEC_EMAIL ou BEC_PASSWORD non configurés.")
+        return
+
+    await update.message.reply_text("🚀 Scan du compte BEC lancé. Vérifie les logs Koyeb !")
+    print("\n--- 🔎 DÉBUT DU SCAN BEC COMPLET ---")
+
+    try:
+        async with OverkizClient(BEC_EMAIL, BEC_PASSWORD, server=MY_SERVER) as client:
+            await client.login()
+            devices = await client.get_devices()
+            
+            for d in devices:
+                # Log ultra-détaillé dans Koyeb
+                print(f"\n📦 DISPOSITIF : {d.label}")
+                print(f"   Widget: {d.widget} | UI Class: {d.ui_class}")
+                print(f"   URL: {d.device_url}")
+                
+                print("   --- STATES (États) ---")
+                for s in d.states:
+                    print(f"   [STATE] {s.name}: {s.value}")
+                
+                print("   --- COMMANDS (Commandes) ---")
+                for c in d.definition.commands:
+                    print(f"   [CMD] {c.command_name} (Params: {c.n_args})")
+            
+            print("\n--- ✅ FIN DU SCAN BEC ---")
+            await update.message.reply_text(f"✅ Scan terminé. {len(devices)} objets analysés dans les logs.")
+
+    except Exception as e:
+        print(f"❌ ERREUR SCAN BEC : {str(e)}")
+        await update.message.reply_text(f"❌ Erreur lors du scan : {e}")
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -132,6 +169,7 @@ def main():
     threading.Thread(target=lambda: HTTPServer(('0.0.0.0', 8000), Health).serve_forever(), daemon=True).start()
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", lambda u,c: u.message.reply_text(f"🚀 Pilotage v{VERSION}", reply_markup=get_keyboard())))
+    app.add_handler(CommandHandler("bec", bec_handler))
     app.add_handler(CallbackQueryHandler(button_handler))
     loop = asyncio.get_event_loop()
     loop.create_task(background_logger())
