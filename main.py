@@ -19,6 +19,7 @@ SHELLY_SERVER = os.getenv("SHELLY_SERVER", "shelly-209-eu.shelly.cloud")
 DB_URL = os.getenv("DATABASE_URL")
 BEC_EMAIL = os.getenv("BEC_EMAIL")
 BEC_PASSWORD = os.getenv("BEC_PASSWORD")
+SERVER_SAUTER = SUPPORTED_SERVERS["sauter_cozytouch"]
 
 CONFORT_VALS = {
     "14253355#1": {"name": "Salon", "temp": 19.5},
@@ -105,7 +106,7 @@ async def bec_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     print("\n--- 🔎 DÉBUT DU SCAN BEC COMPLET ---")
 
     try:
-        async with OverkizClient(BEC_EMAIL, BEC_PASSWORD, server=MY_SERVER) as client:
+        async with OverkizClient(BEC_EMAIL, BEC_PASSWORD, server=SERVER_SAUTER) as client:
             await client.login()
             devices = await client.get_devices()
             
