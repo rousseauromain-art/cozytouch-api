@@ -98,7 +98,7 @@ async def apply_heating_mode(target_mode):
         return "\n".join(results)
         
 async def bec_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not EMAIL_BEC or not PASS_BEC:
+    if not BEC_EMAIL  or not BEC_PASSWORD :
         await update.message.reply_text("❌ Variables BEC_EMAIL ou BEC_PASSWORD manquantes.")
         return
 
@@ -107,7 +107,7 @@ async def bec_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         # On injecte l'URL brute confirmée par ton diagnostic
-        async with OverkizClient(EMAIL_BEC, PASS_BEC, server=SERVER_BEC) as client:
+        async with OverkizClient(BEC_EMAIL,BEC_PASSWORD,server=SERVER_BEC) as client:
             await client.login()
             devices = await client.get_devices()
             
