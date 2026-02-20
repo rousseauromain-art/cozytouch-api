@@ -110,7 +110,7 @@ async def bec_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     print(f"\n--- 🚀 SCAN BEC (Forced Endpoint: {custom_server.endpoint}) ---")
 
     try:
-        async with OverkizClient(EMAIL_BEC, PASS_BEC, server=custom_server) as client:
+        async with OverkizClient(BEC_EMAIL, BEC_PASSWORD, server=custom_server) as client:
             await client.login()
             devices = await client.get_devices()
             for d in devices:
