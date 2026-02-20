@@ -101,39 +101,27 @@ async def apply_heating_mode(target_mode):
                     results.append(f"✅ <b>{info['name']}</b> : {t_val}°C")
                 except: results.append(f"❌ <b>{info['name']}</b> : Erreur")
         return "\n".join(results)
-    
-async def bec_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not EMAIL_BEC or not PASS_BEC:
-        await update.message.reply_text("❌ Variables BEC_EMAIL ou BEC_PASSWORD manquantes.")
-        return
 
-    # On teste les 3 endpoints majeurs avec une requête de login brute
+async def bec_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # On teste l'URL de la nouvelle infrastructure Atlantic/Sauter
+    # C'est souvent 'api.groupe-atlantic.com' ou une variante ha110 sans le /rest/
     endpoints = {
-        "Sauter (ha110)": "https://ha110-1.overkiz.com/externalapi/rest/login",
-        "Atlantic (ha101)": "https://ha101-1.overkiz.com/externalapi/rest/login",
-        "API Globale": "https://kiz-api.overkiz.com/externalapi/rest/login"
+        "Sauter Direct": "https://ha110-1.overkiz.com/externalapi/login", # Sans /rest/
+        "Atlantic API": "https://api.groupe-atlantic.com/token", # Nouvelle API OAuth
+        "Overkiz Auth": "https://www.overkiz.com/common/main/login" # Auth portail
     }
 
-    await update.message.reply_text("🧪 Test de connexion directe aux serveurs Sauter...")
+    await update.message.reply_text("🔍 Tentative de détection du protocole Sauter...")
     
     results = []
     async with httpx.AsyncClient() as client:
         for name, url in endpoints.items():
             try:
-                # Tentative de login via POST (comme le fait l'app Android)
-                payload = {"userId": EMAIL_BEC, "userPassword": PASS_BEC}
-                response = await client.post(url, data=payload, timeout=10)
-                
-                status = response.status_code
-                if status == 200:
-                    results.append(f"✅ **{name}** : SUCCÈS (200)")
-                    print(f"DEBUG: Connexion réussie sur {url}")
-                elif status == 401:
-                    results.append(f"🔑 **{name}** : Erreur 401 (MDP invalide)")
-                else:
-                    results.append(f"❌ **{name}** : Erreur {status}")
+                # On teste juste si le serveur répond (GET) pour valider le DNS
+                response = await client.get(url, timeout=5)
+                results.append(f"📡 **{name}** : Connecté (Code {response.status_code})")
             except Exception as e:
-                results.append(f"⚠️ **{name}** : Erreur réseau ({str(e)[:30]}...)")
+                results.append(f"❌ **{name}** : Hors ligne ou DNS KO")
 
     await update.message.reply_text("\n".join(results), parse_mode='Markdown')
 
