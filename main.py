@@ -139,33 +139,55 @@ async def apply_heating_mode(target_mode):
 ####
 # --- LE HANDLER TELEGRAM /bec ---
 async def bec_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not BEC_EMAIL or not BEC_PASSWORD:
-        await update.message.reply_text("❌ Variables BEC_EMAIL ou BEC_PASSWORD manquantes dans Koyeb.")
+    # 1. Vérification immédiate des variables
+    email = os.getenv("BEC_EMAIL")
+    password = os.getenv("BEC_PASSWORD")
+    
+    if not email or not password:
+        await update.message.reply_text("❌ ERREUR : Les variables BEC_EMAIL ou BEC_PASSWORD sont vides dans Koyeb.")
         return
 
-    await update.message.reply_text("🔎 Interrogation du serveur Sauter (BEC)...")
-    
-    sauter = SauterAuth(BEC_EMAIL, BEC_PASSWORD)
-    devices = await sauter.get_data()
-    
-    if devices:
-        print("\n--- 🔎 DUMP SAUTER COMPLET ---")
-        summary = []
-        for d in devices:
-            # On log tout dans Koyeb pour notre analyse
-            print(f"\n📦 {d.get('label')} ({d.get('widget')})")
-            for s in d.get('states', []):
-                print(f"   [STATE] {s['name']}: {s['value']}")
-                # On filtre juste pour le résumé Telegram
-                if "ElectricEnergy" in s['name'] or "Temperature" in s['name']:
-                    summary.append(f"🔹 {s['name']}: <b>{s['value']}</b>")
+    msg = await update.message.reply_text("📡 Tentative de connexion Sauter...")
+
+    try:
+        # Configuration identique à l'app mobile Sauter
+        headers = {
+            "X-Application-Id": "cp7He8X6836936S6",
+            "User-Agent": "Mozilla/5.0 (Sauter Cozytouch)"
+        }
+        
+        async with httpx.AsyncClient(headers=headers, follow_redirects=True, timeout=15) as client:
+            # Tentative de Login
+            login_url = "https://ha101-1.overkiz.com/externalapi/rest/login"
+            response = await client.post(login_url, data={"userId": email, "userPassword": password})
             
-        await update.message.reply_text(
-            f"✅ Connexion réussie !\n\n" + "\n".join(summary) + "\n\n<i>Détails complets envoyés dans les logs Koyeb.</i>",
-            parse_mode='HTML'
-        )
-    else:
-        await update.message.reply_text("❌ Échec de l'authentification Sauter. Vérifie les logs Koyeb pour le code d'erreur.")         
+            if response.status_code != 200:
+                error_detail = f"Code: {response.status_code}\nRéponse: {response.text[:100]}"
+                await msg.edit_text(f"❌ Échec Authentification :\n{error_detail}")
+                return
+
+            # Si login OK, on récupère les devices
+            await msg.edit_text("✅ Auth OK ! Récupération des données...")
+            dev_res = await client.get("https://ha101-1.overkiz.com/externalapi/rest/setup/devices")
+            
+            if dev_res.status_code == 200:
+                devices = dev_res.json()
+                # On construit un résumé textuel pour Telegram car pas de logs
+                resume = [f"✅ {len(devices)} appareils trouvés."]
+                for d in devices:
+                    resume.append(f"\n📍 {d.get('label')} ({d.get('widget')})")
+                    # On cherche la température et la conso
+                    for s in d.get('states', []):
+                        if "Temperature" in s['name'] or "Energy" in s['name']:
+                            resume.append(f"• {s['name']}: {s['value']}")
+                
+                await msg.edit_text("\n".join(resume))
+            else:
+                await msg.edit_text(f"❌ Erreur Devices : {dev_res.status_code}")
+
+    except Exception as e:
+        # ICI : On renvoie l'erreur système brute dans Telegram
+        await msg.edit_text(f"💥 ERREUR CRITIQUE SYSTEME :\n`{type(e).__name__}: {str(e)}`", parse_mode='Markdown')        
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
