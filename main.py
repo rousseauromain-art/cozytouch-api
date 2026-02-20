@@ -111,7 +111,7 @@ async def bec_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
 
     await update.message.reply_text(f"🚀 Serveur ha110-1 confirmé. Connexion au compte Sauter...")
-    print(f"\n--- 🔎 SCAN BEC (Force Server: {SERVER_BEC}) ---")
+    print(f"\n--- 🔎 SCAN BEC (Force Server: {CUSTOM_SERVER}) ---")
 
     try:
         # On injecte l'URL brute confirmée par ton diagnostic
