@@ -104,42 +104,46 @@ async def apply_heating_mode(target_mode):
 ####
 async def bec_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not EMAIL_BEC or not PASS_BEC:
-        await update.message.reply_text("❌ Variables BEC manquantes.")
+        await update.message.reply_text("❌ Variables BEC_EMAIL ou BEC_PASSWORD manquantes.")
         return
 
-    await update.message.reply_text("🚀 Serveur ha110-1 joint. Tentative d'auth finale...")
-
-    # On définit manuellement la configuration que la lib pyoverkiz attend
-    from pyoverkiz.models import ServerConfig
-    
-    # L'URL exacte pour les serveurs haXXX est celle-ci :
-    BEC_SERVER = ServerConfig(
-        endpoint="https://ha110-1.overkiz.com/externalapi/rest/",
-        name="Sauter_Manual",
-        manufacturer="Sauter"
-    )
+    await update.message.reply_text("🚀 Connexion forcée (Sauter ha110-1)...")
 
     try:
-        async with OverkizClient(EMAIL_BEC, PASS_BEC, server=BEC_SERVER) as client:
+        # 1. On récupère une config existante (ex: atlantic) pour avoir la structure
+        # On fait une copie pour ne pas casser la partie radiateur
+        import copy
+        custom_server = copy.copy(SUPPORTED_SERVERS["atlantic_cozytouch"])
+        
+        # 2. On modifie manuellement les attributs de l'objet
+        # C'est l'URL exacte validée par nos tests DNS/404
+        custom_server.endpoint = "https://ha110-1.overkiz.com/externalapi/rest/"
+        custom_server.name = "Sauter_Manual"
+
+        print(f"\n--- 🚀 TENTATIVE BEC (Forced Server: {custom_server.endpoint}) ---")
+
+        async with OverkizClient(EMAIL_BEC, PASS_BEC, server=custom_server) as client:
             await client.login()
             devices = await client.get_devices()
             
-            print(f"✅ CONNECTÉ ! {len(devices)} appareils trouvés.")
-            
+            print(f"✅ SUCCÈS ! {len(devices)} appareils trouvés.")
             for d in devices:
-                print(f"\n📦 [{d.label}]")
+                print(f"\n📦 [{d.label}] ({d.widget})")
                 for s in d.states:
-                    # On cherche spécifiquement la conso ou la température
-                    if "Consumption" in s.name or "Temperature" in s.name:
-                        print(f"   👉 {s.name}: {s.value}")
-                
-            await update.message.reply_text(f"✅ SUCCÈS ! {len(devices)} appareils détectés. Analyse les logs pour les States.")
+                    # On affiche tout pour identifier les commandes de ton ballon
+                    print(f"   [STATE] {s.name}: {s.value}")
+            
+            await update.message.reply_text(f"✅ Connecté ! {len(devices)} appareils vus dans les logs.")
 
     except Exception as e:
-        error_type = type(e).__name__
-        print(f"💥 ERREUR FINALE BEC: {error_type} -> {e}")
-        await update.message.reply_text(f"❌ L'auth a échoué ({error_type}). Vérifie tes identifiants BEC sur Koyeb.")
-        
+        error_msg = str(e)
+        print(f"💥 ERREUR : {error_msg}")
+        if "401" in error_msg or "Bad credentials" in error_msg:
+            await update.message.reply_text("🔑 Erreur 401 : Tes identifiants BEC sont refusés. Vérifie le MDP sur Koyeb.")
+        else:
+            await update.message.reply_text(f"❌ Échec : {error_msg}")
+            
+
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
