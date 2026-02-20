@@ -1,3 +1,4 @@
+import socket
 import os, asyncio, threading, httpx, psycopg2
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -6,7 +7,7 @@ from pyoverkiz.client import OverkizClient
 from pyoverkiz.const import SUPPORTED_SERVERS
 from pyoverkiz.models import Command
 
-VERSION = "9.22 (Final - Shelly UI & Debug)"
+VERSION = "9.23 (Final - Shelly UI & Debug)"
 
 # --- CONFIG ---
 TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -97,44 +98,35 @@ async def apply_heating_mode(target_mode):
         return "\n".join(results)
         
 async def bec_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # L'URL officielle du endpoint Sauter
-    AUTH_URL = "https://kiz-api.overkiz.com/externalapi/rest/login"
+    test_servers = ["ha110-1.overkiz.com", "ha101-1.overkiz.com", "ha109-1.overkiz.com"]
+    report = ["🔍 **DIAGNOSTIC RÉSEAU BEC**"]
     
-    async with httpx.AsyncClient() as client:
-        print(f"(Tentative) de connexion pour : {BEC_EMAIL}")
-        
-        # 1. AUTHENTIFICATION
+    for host in test_servers:
+        print(f"\n--- Diagnostic pour {host} ---")
+        # 1. Test DNS
         try:
-            # On envoie les credentials comme le ferait l'app Sauter
-            r = await client.post(AUTH_URL, data={"userId":BEC_EMAIL , "userPassword": BEC_PASSWORD}, timeout=10)
-            
-            if r.status_code != 200:
-                print(f"❌ Erreur Auth: {r.status_code}")
-                print(f"Réponse: {r.text}")
-                return
-
-            # On récupère le cookie de session (JSESSIONID)
-            print("✅ Authentification réussie !")
-            
-            # 2. RÉCUPÉRATION DES DEVICES
-            print("🔍 Récupération des équipements...")
-            r_devices = await client.get("https://kiz-api.overkiz.com/externalapi/rest/setup/devices", timeout=10)
-            
-            if r_devices.status_code == 200:
-                devices = r_devices.json()
-                print(f"Found {len(devices)} devices.")
-                for d in devices:
-                    print(f"\n--- NOM : {d.get('label')} ---")
-                    print(f"URL: {d.get('deviceURL')}")
-                    print(f"Widget: {d.get('widget')}")
-                    # On affiche les états pour trouver la conso
-                    for state in d.get('states', []):
-                        print(f"  [STATE] {state['name']}: {state['value']}")
-            else:
-                print(f"❌ Erreur lecture devices: {r_devices.status_code}")
-
+            ip = socket.gethostbyname(host)
+            dns_status = f"✅ DNS: OK ({ip})"
+            print(dns_status)
         except Exception as e:
-            print(f"💥 Erreur Critique: {str(e)}")
+            dns_status = f"❌ DNS: ÉCHEC ({e})"
+            print(dns_status)
+            report.append(f"🌐 **{host}**\n   {dns_status}")
+            continue # Si le DNS échoue, on ne teste pas la connexion
+
+        # 2. Test de connexion au port 443 (HTTPS)
+        try:
+            s = socket.create_connection((host, 443), timeout=5)
+            s.close()
+            conn_status = "✅ Connexion Port 443: OK"
+            print(conn_status)
+        except Exception as e:
+            conn_status = f"❌ Connexion Port 443: ÉCHEC ({e})"
+            print(conn_status)
+        
+        report.append(f"🌐 **{host}**\n   {dns_status}\n   {conn_status}")
+
+    await update.message.reply_text("\n\n".join(report), parse_mode='Markdown')
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
