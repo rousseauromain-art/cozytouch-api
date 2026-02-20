@@ -5,8 +5,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from pyoverkiz.client import OverkizClient
 from pyoverkiz.const import SUPPORTED_SERVERS
-from pyoverkiz.models import Command
-from pyoverkiz.const import ServerConfig
+from pyoverkiz.models import Command,ServerConfig
 
 VERSION = "9.23 (Final - Shelly UI & Debug)"
 
