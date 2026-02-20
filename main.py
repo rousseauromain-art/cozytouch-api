@@ -101,29 +101,45 @@ async def apply_heating_mode(target_mode):
                     results.append(f"✅ <b>{info['name']}</b> : {t_val}°C")
                 except: results.append(f"❌ <b>{info['name']}</b> : Erreur")
         return "\n".join(results)
-
+####
 async def bec_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # On teste l'URL de la nouvelle infrastructure Atlantic/Sauter
-    # C'est souvent 'api.groupe-atlantic.com' ou une variante ha110 sans le /rest/
-    endpoints = {
-        "Sauter Direct": "https://ha110-1.overkiz.com/externalapi/login", # Sans /rest/
-        "Atlantic API": "https://api.groupe-atlantic.com/token", # Nouvelle API OAuth
-        "Overkiz Auth": "https://www.overkiz.com/common/main/login" # Auth portail
-    }
+    if not EMAIL_BEC or not PASS_BEC:
+        await update.message.reply_text("❌ Variables BEC manquantes.")
+        return
 
-    await update.message.reply_text("🔍 Tentative de détection du protocole Sauter...")
+    await update.message.reply_text("🚀 Serveur ha110-1 joint. Tentative d'auth finale...")
+
+    # On définit manuellement la configuration que la lib pyoverkiz attend
+    from pyoverkiz.models import ServerConfig
     
-    results = []
-    async with httpx.AsyncClient() as client:
-        for name, url in endpoints.items():
-            try:
-                # On teste juste si le serveur répond (GET) pour valider le DNS
-                response = await client.get(url, timeout=5)
-                results.append(f"📡 **{name}** : Connecté (Code {response.status_code})")
-            except Exception as e:
-                results.append(f"❌ **{name}** : Hors ligne ou DNS KO")
+    # L'URL exacte pour les serveurs haXXX est celle-ci :
+    BEC_SERVER = ServerConfig(
+        endpoint="https://ha110-1.overkiz.com/externalapi/rest/",
+        name="Sauter_Manual",
+        manufacturer="Sauter"
+    )
 
-    await update.message.reply_text("\n".join(results), parse_mode='Markdown')
+    try:
+        async with OverkizClient(EMAIL_BEC, PASS_BEC, server=BEC_SERVER) as client:
+            await client.login()
+            devices = await client.get_devices()
+            
+            print(f"✅ CONNECTÉ ! {len(devices)} appareils trouvés.")
+            
+            for d in devices:
+                print(f"\n📦 [{d.label}]")
+                for s in d.states:
+                    # On cherche spécifiquement la conso ou la température
+                    if "Consumption" in s.name or "Temperature" in s.name:
+                        print(f"   👉 {s.name}: {s.value}")
+                
+            await update.message.reply_text(f"✅ SUCCÈS ! {len(devices)} appareils détectés. Analyse les logs pour les States.")
+
+    except Exception as e:
+        error_type = type(e).__name__
+        print(f"💥 ERREUR FINALE BEC: {error_type} -> {e}")
+        await update.message.reply_text(f"❌ L'auth a échoué ({error_type}). Vérifie tes identifiants BEC sur Koyeb.")
+        
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
