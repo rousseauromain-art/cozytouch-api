@@ -18,8 +18,12 @@ SHELLY_TOKEN = os.getenv("SHELLY_TOKEN")
 SHELLY_ID = os.getenv("SHELLY_ID")
 SHELLY_SERVER = os.getenv("SHELLY_SERVER", "shelly-209-eu.shelly.cloud")
 DB_URL = os.getenv("DATABASE_URL")
-BEC_EMAIL = os.getenv("BEC_EMAIL")
-BEC_PASSWORD = os.getenv("BEC_PASSWORD")
+# --- CONFIG BEC (CozySauter) ---
+# Utilisation des variables confirmées
+EMAIL_BEC = os.getenv("BEC_EMAIL")
+PASS_BEC = os.getenv("BEC_PASSWORD")
+#BEC_EMAIL = os.getenv("BEC_EMAIL")
+#BEC_PASSWORD = os.getenv("BEC_PASSWORD")
 SERVER_BEC = "ha110-1.overkiz.com"
 
 CONFORT_VALS = {
@@ -97,37 +101,59 @@ async def apply_heating_mode(target_mode):
                 except: results.append(f"❌ <b>{info['name']}</b> : Erreur")
         return "\n".join(results)
         
+# --- SCANNER D'ENDPOINTS BEC ---
 async def bec_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not BEC_EMAIL  or not BEC_PASSWORD :
-        await update.message.reply_text("❌ Variables BEC_EMAIL ou BEC_PASSWORD manquantes.")
+    if not EMAIL_BEC or not PASS_BEC:
+        await update.message.reply_text("❌ Variables BEC_EMAIL ou BEC_PASSWORD manquantes sur Koyeb.")
         return
-    # et on modifie juste l'endpoint pour le BEC
-    custom_server = SUPPORTED_SERVERS["atlantic_cozytouch"]
-    # On force l'URL de Sauter ha110-1 que ton diagnostic a validé
-    custom_server.endpoint = "https://ha110-1.overkiz.com/externalapi/rest/"
-    custom_server.name = "Sauter_Forced"
 
-    print(f"\n--- 🚀 SCAN BEC (Forced Endpoint: {custom_server.endpoint}) ---")
+    # Liste des URLs physiques à tester pour Sauter
+    endpoints_to_test = [
+        "https://ha110-1.overkiz.com/externalapi/rest/",
+        "https://ha110-1.overkiz.com/externalapi/",
+        "https://ha101-1.overkiz.com/externalapi/rest/",
+        "https://ha101-1.overkiz.com/externalapi/"
+    ]
 
-    try:
-        async with OverkizClient(BEC_EMAIL, BEC_PASSWORD, server=custom_server) as client:
-            await client.login()
-            devices = await client.get_devices()
-            for d in devices:
-                print(f"\n📦 EQUIPEMENT : {d.label}")
-                print(f"   Widget: {d.widget} | UI Class: {d.ui_class}")
-                print(f"   URL: {d.device_url}")
-                print("   --- STATES (Recherche Conso/Chauffe) ---")
-                for s in d.states:
-                    print(f"   [STATE] {s.name}: {s.value}")
-                print("   --- COMMANDS ---")
-                for c in d.definition.commands:
-                    print(f"   [CMD] {c.command_name}")
+    await update.message.reply_text(f"🔍 Scan des {len(endpoints_to_test)} endpoints avec le compte BEC...")
+    print(f"\n--- 🚀 DÉBUT SCAN BEC ({EMAIL_BEC}) ---")
+
+    for url in endpoints_to_test:
+        print(f"🧪 Test de l'URL : {url}")
+        try:
+            # On clone la config existante et on injecte l'URL de test
+            test_server = SUPPORTED_SERVERS["atlantic_cozytouch"]
+            test_server.endpoint = url
+            test_server.name = "BEC_Test_Server"
             
-            await update.message.reply_text(f"✅ SUCCÈS ! {len(devices)} objets trouvés. Analyse les logs Koyeb.")
-    except Exception as e:
-        print(f"💥 ERREUR AUTH/SCAN BEC: {e}")
-        await update.message.reply_text(f"❌ Erreur lors de l'auth ou du scan : {e}")        
+            async with OverkizClient(EMAIL_BEC, PASS_BEC, server=test_server) as client:
+                await client.login() # L'étape critique
+                
+                # Si le login passe, on récupère les objets
+                devices = await client.get_devices()
+                print(f"✅ SUCCÈS TOTAL sur {url} !")
+                
+                await update.message.reply_text(f"🥳 **TROUVÉ !**\nURL: `{url}`\nAppareils: {len(devices)}", parse_mode='Markdown')
+                
+                # On dumper les logs pour l'analyse
+                for d in devices:
+                    print(f"\n📦 EQUIPEMENT : {d.label} ({d.widget})")
+                    for s in d.states:
+                        print(f"   [STATE] {s.name}: {s.value}")
+                return # Mission accomplie, on arrête le scan
+
+        except Exception as e:
+            err_msg = str(e)
+            if "404" in err_msg:
+                print(f"❌ 404 : Mauvais chemin.")
+            elif "401" in err_msg or "Bad credentials" in err_msg:
+                print(f"🔑 401 : URL correcte mais IDENTIFIANTS REFUSÉS pour {EMAIL_BEC}")
+                await update.message.reply_text(f"⚠️ URL `{url}` détectée, mais le serveur refuse tes identifiants BEC. Vérifie le mot de passe sur Koyeb.")
+                return
+            else:
+                print(f"❓ Autre erreur sur {url} : {err_msg}")
+
+    await update.message.reply_text("❌ Aucun endpoint n'a répondu favorablement. Analyse les logs.")
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
