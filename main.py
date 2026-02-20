@@ -20,7 +20,7 @@ SHELLY_SERVER = os.getenv("SHELLY_SERVER", "shelly-209-eu.shelly.cloud")
 DB_URL = os.getenv("DATABASE_URL")
 BEC_EMAIL = os.getenv("BEC_EMAIL")
 BEC_PASSWORD = os.getenv("BEC_PASSWORD")
-SERVER_SAUTER = SUPPORTED_SERVERS["sauter_cozytouch"]
+SERVER_BEC = "ha110-1.overkiz.com"
 
 CONFORT_VALS = {
     "14253355#1": {"name": "Salon", "temp": 19.5},
@@ -98,35 +98,34 @@ async def apply_heating_mode(target_mode):
         return "\n".join(results)
         
 async def bec_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    test_servers = ["ha110-1.overkiz.com", "ha101-1.overkiz.com", "ha109-1.overkiz.com"]
-    report = ["🔍 **DIAGNOSTIC RÉSEAU BEC**"]
-    
-    for host in test_servers:
-        print(f"\n--- Diagnostic pour {host} ---")
-        # 1. Test DNS
-        try:
-            ip = socket.gethostbyname(host)
-            dns_status = f"✅ DNS: OK ({ip})"
-            print(dns_status)
-        except Exception as e:
-            dns_status = f"❌ DNS: ÉCHEC ({e})"
-            print(dns_status)
-            report.append(f"🌐 **{host}**\n   {dns_status}")
-            continue # Si le DNS échoue, on ne teste pas la connexion
+    if not EMAIL_BEC or not PASS_BEC:
+        await update.message.reply_text("❌ Variables BEC_EMAIL ou BEC_PASSWORD manquantes.")
+        return
 
-        # 2. Test de connexion au port 443 (HTTPS)
-        try:
-            s = socket.create_connection((host, 443), timeout=5)
-            s.close()
-            conn_status = "✅ Connexion Port 443: OK"
-            print(conn_status)
-        except Exception as e:
-            conn_status = f"❌ Connexion Port 443: ÉCHEC ({e})"
-            print(conn_status)
-        
-        report.append(f"🌐 **{host}**\n   {dns_status}\n   {conn_status}")
+    await update.message.reply_text(f"🚀 Serveur ha110-1 confirmé. Connexion au compte Sauter...")
+    print(f"\n--- 🔎 SCAN BEC (Force Server: {SERVER_BEC}) ---")
 
-    await update.message.reply_text("\n\n".join(report), parse_mode='Markdown')
+    try:
+        # On injecte l'URL brute confirmée par ton diagnostic
+        async with OverkizClient(EMAIL_BEC, PASS_BEC, server=SERVER_BEC) as client:
+            await client.login()
+            devices = await client.get_devices()
+            
+            for d in devices:
+                print(f"\n📦 EQUIPEMENT : {d.label}")
+                print(f"   Widget: {d.widget} | UI Class: {d.ui_class}")
+                print(f"   URL: {d.device_url}")
+                print("   --- STATES (Recherche Conso/Chauffe) ---")
+                for s in d.states:
+                    print(f"   [STATE] {s.name}: {s.value}")
+                print("   --- COMMANDS ---")
+                for c in d.definition.commands:
+                    print(f"   [CMD] {c.command_name}")
+            
+            await update.message.reply_text(f"✅ SUCCÈS ! {len(devices)} objets trouvés. Analyse les logs Koyeb.")
+    except Exception as e:
+        print(f"💥 ERREUR AUTH/SCAN BEC: {e}")
+        await update.message.reply_text(f"❌ Erreur lors de l'auth ou du scan : {e}")        
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
