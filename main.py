@@ -35,14 +35,24 @@ CONFORT_VALS = {
 }
 
 
-class SauterClient:
+# --- CLASSE TECHNIQUE POUR LE BEC SAUTER ---
+class SauterAuth:
     def __init__(self, email, password):
         self.email = email
         self.password = password
-        self.session = httpx.AsyncClient(timeout=20)
-        self.base_url = "https://ha101-1.overkiz.com/externalapi/rest"
-        # Cet ID est souvent requis pour s'identifier comme l'app Sauter
-        self.app_id = "cp7He8X6836936S6" 
+        self.headers = {"X-Application-Id": "cp7He8X6836936S6"}
+        self.client = httpx.AsyncClient(headers=self.headers, follow_redirects=True, timeout=20)
+
+    async def get_data(self):
+        # Tentative de login + récupération immédiate
+        login_url = "https://ha101-1.overkiz.com/externalapi/rest/login"
+        r = await self.client.post(login_url, data={"userId": self.email, "userPassword": self.password})
+        if r.status_code == 200:
+            # Si login OK, on demande les appareils
+            dev_res = await self.client.get("https://ha101-1.overkiz.com/externalapi/rest/setup/devices")
+            return dev_res.json() if dev_res.status_code == 200 else None
+        print(f"DEBUG SAUTER ERR: {r.status_code} - {r.text}")
+        return None
 
     async def login(self):
         url = f"{self.base_url}/login"
@@ -127,26 +137,35 @@ async def apply_heating_mode(target_mode):
                 except: results.append(f"❌ <b>{info['name']}</b> : Erreur")
         return "\n".join(results)
 ####
-# --- Fonction à intégrer dans ton Bot ---
-async def bec_handler(update, context):
-    client = SauterClient(BEC_EMAIL, BEC_PASSWORD)
-    if await client.login():
-        devices = await client.get_devices()
-        print(f"--- DUMP COMPLET BEC ({len(devices)} devices) ---")
-        report = []
+# --- LE HANDLER TELEGRAM /bec ---
+async def bec_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not BEC_EMAIL or not BEC_PASSWORD:
+        await update.message.reply_text("❌ Variables BEC_EMAIL ou BEC_PASSWORD manquantes dans Koyeb.")
+        return
+
+    await update.message.reply_text("🔎 Interrogation du serveur Sauter (BEC)...")
+    
+    sauter = SauterAuth(BEC_EMAIL, BEC_PASSWORD)
+    devices = await sauter.get_data()
+    
+    if devices:
+        print("\n--- 🔎 DUMP SAUTER COMPLET ---")
+        summary = []
         for d in devices:
-            # On log tout dans Koyeb comme demandé
-            print(f"\n📦 {d.get('label')} | Widget: {d.get('widget')}")
-            states = d.get('states', [])
-            for s in states:
-                print(f"  [STATE] {s['name']}: {s['value']}")
-                # On prépare un petit résumé pour Telegram
-                if "Consumption" in s['name'] or "OperatingMode" in s['name']:
-                    report.append(f"<b>{s['name']}</b>: {s['value']}")
-        
-        await update.message.reply_text(f"✅ Scan réussi. Vérifie Koyeb.\nRésumé:\n" + "\n".join(report), parse_mode='HTML')
+            # On log tout dans Koyeb pour notre analyse
+            print(f"\n📦 {d.get('label')} ({d.get('widget')})")
+            for s in d.get('states', []):
+                print(f"   [STATE] {s['name']}: {s['value']}")
+                # On filtre juste pour le résumé Telegram
+                if "ElectricEnergy" in s['name'] or "Temperature" in s['name']:
+                    summary.append(f"🔹 {s['name']}: <b>{s['value']}</b>")
+            
+        await update.message.reply_text(
+            f"✅ Connexion réussie !\n\n" + "\n".join(summary) + "\n\n<i>Détails complets envoyés dans les logs Koyeb.</i>",
+            parse_mode='HTML'
+        )
     else:
-        await update.message.reply_text("❌ Erreur d'authentification Sauter.")            
+        await update.message.reply_text("❌ Échec de l'authentification Sauter. Vérifie les logs Koyeb pour le code d'erreur.")         
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
