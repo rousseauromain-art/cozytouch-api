@@ -23,8 +23,8 @@ DB_URL = os.getenv("DATABASE_URL")
 # Utilisation des variables confirmées
 EMAIL_BEC = os.getenv("BEC_EMAIL")
 PASS_BEC = os.getenv("BEC_PASSWORD")
-#BEC_EMAIL = os.getenv("BEC_EMAIL")
-#BEC_PASSWORD = os.getenv("BEC_PASSWORD")
+BEC_EMAIL = os.getenv("BEC_EMAIL")
+BEC_PASSWORD = os.getenv("BEC_PASSWORD")
 SERVER_BEC = "ha110-1.overkiz.com"
 
 CONFORT_VALS = {
