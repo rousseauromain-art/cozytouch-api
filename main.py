@@ -34,6 +34,31 @@ CONFORT_VALS = {
     "4326513#1": {"name": "Sèche-Serviette", "temp": 19.5}
 }
 
+
+class SauterClient:
+    def __init__(self, email, password):
+        self.email = email
+        self.password = password
+        self.session = httpx.AsyncClient(timeout=20)
+        self.base_url = "https://ha101-1.overkiz.com/externalapi/rest"
+        # Cet ID est souvent requis pour s'identifier comme l'app Sauter
+        self.app_id = "cp7He8X6836936S6" 
+
+    async def login(self):
+        url = f"{self.base_url}/login"
+        payload = {"userId": self.email, "userPassword": self.password}
+        # On tente le login direct
+        r = await self.session.post(url, data=payload)
+        if r.status_code == 200:
+            print("✅ Connexion Sauter réussie via API Directe")
+            return True
+        print(f"❌ Échec Auth Sauter: {r.status_code} - {r.text}")
+        return False
+
+    async def get_devices(self):
+        r = await self.session.get(f"{self.base_url}/setup/devices")
+        return r.json() if r.status_code == 200 else []
+
 def init_db():
     if not DB_URL: return
     try:
@@ -102,48 +127,26 @@ async def apply_heating_mode(target_mode):
                 except: results.append(f"❌ <b>{info['name']}</b> : Erreur")
         return "\n".join(results)
 ####
-async def bec_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not EMAIL_BEC or not PASS_BEC:
-        await update.message.reply_text("❌ Variables BEC_EMAIL ou BEC_PASSWORD manquantes.")
-        return
-
-    await update.message.reply_text("🚀 Connexion forcée (Sauter ha110-1)...")
-
-    try:
-        # 1. On récupère une config existante (ex: atlantic) pour avoir la structure
-        # On fait une copie pour ne pas casser la partie radiateur
-        import copy
-        custom_server = copy.copy(SUPPORTED_SERVERS["atlantic_cozytouch"])
+# --- Fonction à intégrer dans ton Bot ---
+async def bec_handler(update, context):
+    client = SauterClient(BEC_EMAIL, BEC_PASSWORD)
+    if await client.login():
+        devices = await client.get_devices()
+        print(f"--- DUMP COMPLET BEC ({len(devices)} devices) ---")
+        report = []
+        for d in devices:
+            # On log tout dans Koyeb comme demandé
+            print(f"\n📦 {d.get('label')} | Widget: {d.get('widget')}")
+            states = d.get('states', [])
+            for s in states:
+                print(f"  [STATE] {s['name']}: {s['value']}")
+                # On prépare un petit résumé pour Telegram
+                if "Consumption" in s['name'] or "OperatingMode" in s['name']:
+                    report.append(f"<b>{s['name']}</b>: {s['value']}")
         
-        # 2. On modifie manuellement les attributs de l'objet
-        # C'est l'URL exacte validée par nos tests DNS/404
-        custom_server.endpoint = "https://ha110-1.overkiz.com/externalapi/rest/"
-        custom_server.name = "Sauter_Manual"
-
-        print(f"\n--- 🚀 TENTATIVE BEC (Forced Server: {custom_server.endpoint}) ---")
-
-        async with OverkizClient(EMAIL_BEC, PASS_BEC, server=custom_server) as client:
-            await client.login()
-            devices = await client.get_devices()
-            
-            print(f"✅ SUCCÈS ! {len(devices)} appareils trouvés.")
-            for d in devices:
-                print(f"\n📦 [{d.label}] ({d.widget})")
-                for s in d.states:
-                    # On affiche tout pour identifier les commandes de ton ballon
-                    print(f"   [STATE] {s.name}: {s.value}")
-            
-            await update.message.reply_text(f"✅ Connecté ! {len(devices)} appareils vus dans les logs.")
-
-    except Exception as e:
-        error_msg = str(e)
-        print(f"💥 ERREUR : {error_msg}")
-        if "401" in error_msg or "Bad credentials" in error_msg:
-            await update.message.reply_text("🔑 Erreur 401 : Tes identifiants BEC sont refusés. Vérifie le MDP sur Koyeb.")
-        else:
-            await update.message.reply_text(f"❌ Échec : {error_msg}")
-            
-
+        await update.message.reply_text(f"✅ Scan réussi. Vérifie Koyeb.\nRésumé:\n" + "\n".join(report), parse_mode='HTML')
+    else:
+        await update.message.reply_text("❌ Erreur d'authentification Sauter.")            
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
