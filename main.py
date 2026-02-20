@@ -101,12 +101,12 @@ async def bec_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     AUTH_URL = "https://kiz-api.overkiz.com/externalapi/rest/login"
     
     async with httpx.AsyncClient() as client:
-        print(f"尝试 (Tentative) de connexion pour : {EMAIL}")
+        print(f"(Tentative) de connexion pour : {BEC_EMAIL}")
         
         # 1. AUTHENTIFICATION
         try:
             # On envoie les credentials comme le ferait l'app Sauter
-            r = await client.post(AUTH_URL, data={"userId": EMAIL, "userPassword": PASSWORD}, timeout=10)
+            r = await client.post(AUTH_URL, data={"userId":BEC_EMAIL , "userPassword": BEC_PASSWORD}, timeout=10)
             
             if r.status_code != 200:
                 print(f"❌ Erreur Auth: {r.status_code}")
