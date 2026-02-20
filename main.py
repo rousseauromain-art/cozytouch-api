@@ -6,6 +6,7 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Cont
 from pyoverkiz.client import OverkizClient
 from pyoverkiz.const import SUPPORTED_SERVERS
 from pyoverkiz.models import Command
+import httpx
 
 VERSION = "9.23 (Final - Shelly UI & Debug)"
 
@@ -100,60 +101,41 @@ async def apply_heating_mode(target_mode):
                     results.append(f"✅ <b>{info['name']}</b> : {t_val}°C")
                 except: results.append(f"❌ <b>{info['name']}</b> : Erreur")
         return "\n".join(results)
-        
-# --- SCANNER D'ENDPOINTS BEC ---
+    
 async def bec_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not EMAIL_BEC or not PASS_BEC:
-        await update.message.reply_text("❌ Variables BEC_EMAIL ou BEC_PASSWORD manquantes sur Koyeb.")
+        await update.message.reply_text("❌ Variables BEC_EMAIL ou BEC_PASSWORD manquantes.")
         return
 
-    # Liste des URLs physiques à tester pour Sauter
-    endpoints_to_test = [
-        "https://ha110-1.overkiz.com/externalapi/rest/",
-        "https://ha110-1.overkiz.com/externalapi/",
-        "https://ha101-1.overkiz.com/externalapi/rest/",
-        "https://ha101-1.overkiz.com/externalapi/"
-    ]
+    # On teste les 3 endpoints majeurs avec une requête de login brute
+    endpoints = {
+        "Sauter (ha110)": "https://ha110-1.overkiz.com/externalapi/rest/login",
+        "Atlantic (ha101)": "https://ha101-1.overkiz.com/externalapi/rest/login",
+        "API Globale": "https://kiz-api.overkiz.com/externalapi/rest/login"
+    }
 
-    await update.message.reply_text(f"🔍 Scan des {len(endpoints_to_test)} endpoints avec le compte BEC...")
-    print(f"\n--- 🚀 DÉBUT SCAN BEC ({EMAIL_BEC}) ---")
-
-    for url in endpoints_to_test:
-        print(f"🧪 Test de l'URL : {url}")
-        try:
-            # On clone la config existante et on injecte l'URL de test
-            test_server = SUPPORTED_SERVERS["atlantic_cozytouch"]
-            test_server.endpoint = url
-            test_server.name = "BEC_Test_Server"
-            
-            async with OverkizClient(EMAIL_BEC, PASS_BEC, server=test_server) as client:
-                await client.login() # L'étape critique
+    await update.message.reply_text("🧪 Test de connexion directe aux serveurs Sauter...")
+    
+    results = []
+    async with httpx.AsyncClient() as client:
+        for name, url in endpoints.items():
+            try:
+                # Tentative de login via POST (comme le fait l'app Android)
+                payload = {"userId": EMAIL_BEC, "userPassword": PASS_BEC}
+                response = await client.post(url, data=payload, timeout=10)
                 
-                # Si le login passe, on récupère les objets
-                devices = await client.get_devices()
-                print(f"✅ SUCCÈS TOTAL sur {url} !")
-                
-                await update.message.reply_text(f"🥳 **TROUVÉ !**\nURL: `{url}`\nAppareils: {len(devices)}", parse_mode='Markdown')
-                
-                # On dumper les logs pour l'analyse
-                for d in devices:
-                    print(f"\n📦 EQUIPEMENT : {d.label} ({d.widget})")
-                    for s in d.states:
-                        print(f"   [STATE] {s.name}: {s.value}")
-                return # Mission accomplie, on arrête le scan
+                status = response.status_code
+                if status == 200:
+                    results.append(f"✅ **{name}** : SUCCÈS (200)")
+                    print(f"DEBUG: Connexion réussie sur {url}")
+                elif status == 401:
+                    results.append(f"🔑 **{name}** : Erreur 401 (MDP invalide)")
+                else:
+                    results.append(f"❌ **{name}** : Erreur {status}")
+            except Exception as e:
+                results.append(f"⚠️ **{name}** : Erreur réseau ({str(e)[:30]}...)")
 
-        except Exception as e:
-            err_msg = str(e)
-            if "404" in err_msg:
-                print(f"❌ 404 : Mauvais chemin.")
-            elif "401" in err_msg or "Bad credentials" in err_msg:
-                print(f"🔑 401 : URL correcte mais IDENTIFIANTS REFUSÉS pour {EMAIL_BEC}")
-                await update.message.reply_text(f"⚠️ URL `{url}` détectée, mais le serveur refuse tes identifiants BEC. Vérifie le mot de passe sur Koyeb.")
-                return
-            else:
-                print(f"❓ Autre erreur sur {url} : {err_msg}")
-
-    await update.message.reply_text("❌ Aucun endpoint n'a répondu favorablement. Analyse les logs.")
+    await update.message.reply_text("\n".join(results), parse_mode='Markdown')
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
