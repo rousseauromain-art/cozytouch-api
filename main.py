@@ -6,6 +6,7 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Cont
 from pyoverkiz.client import OverkizClient
 from pyoverkiz.const import SUPPORTED_SERVERS
 from pyoverkiz.models import Command
+from pyoverkiz.const import ServerConfig
 
 VERSION = "9.23 (Final - Shelly UI & Debug)"
 
@@ -101,13 +102,20 @@ async def bec_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not BEC_EMAIL  or not BEC_PASSWORD :
         await update.message.reply_text("❌ Variables BEC_EMAIL ou BEC_PASSWORD manquantes.")
         return
+    # On crée l'objet ServerConfig manuellement avec l'URL qui a réussi le diagnostic
+    CUSTOM_SERVER = ServerConfig(
+        endpoint="https://ha110-1.overkiz.com/externalapi/rest/",
+        name="Sauter Brut",
+        manufacturer="Sauter"
+    )
+    
 
     await update.message.reply_text(f"🚀 Serveur ha110-1 confirmé. Connexion au compte Sauter...")
     print(f"\n--- 🔎 SCAN BEC (Force Server: {SERVER_BEC}) ---")
 
     try:
         # On injecte l'URL brute confirmée par ton diagnostic
-        async with OverkizClient(BEC_EMAIL,BEC_PASSWORD,server=SERVER_BEC) as client:
+        async with OverkizClient(BEC_EMAIL,BEC_PASSWORD,server=CUSTOM_SERVER) as client:
             await client.login()
             devices = await client.get_devices()
             
