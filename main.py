@@ -101,23 +101,18 @@ async def bec_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not BEC_EMAIL  or not BEC_PASSWORD :
         await update.message.reply_text("❌ Variables BEC_EMAIL ou BEC_PASSWORD manquantes.")
         return
-    # On crée l'objet ServerConfig manuellement avec l'URL qui a réussi le diagnostic
-    CUSTOM_SERVER = ServerConfig(
-        endpoint="https://ha110-1.overkiz.com/externalapi/rest/",
-        name="Sauter Brut",
-        manufacturer="Sauter"
-    )
-    
+    # et on modifie juste l'endpoint pour le BEC
+    custom_server = SUPPORTED_SERVERS["atlantic_cozytouch"]
+    # On force l'URL de Sauter ha110-1 que ton diagnostic a validé
+    custom_server.endpoint = "https://ha110-1.overkiz.com/externalapi/rest/"
+    custom_server.name = "Sauter_Forced"
 
-    await update.message.reply_text(f"🚀 Serveur ha110-1 confirmé. Connexion au compte Sauter...")
-    print(f"\n--- 🔎 SCAN BEC (Force Server: {CUSTOM_SERVER}) ---")
+    print(f"\n--- 🚀 SCAN BEC (Forced Endpoint: {custom_server.endpoint}) ---")
 
     try:
-        # On injecte l'URL brute confirmée par ton diagnostic
-        async with OverkizClient(BEC_EMAIL,BEC_PASSWORD,server=CUSTOM_SERVER) as client:
+        async with OverkizClient(EMAIL_BEC, PASS_BEC, server=custom_server) as client:
             await client.login()
             devices = await client.get_devices()
-            
             for d in devices:
                 print(f"\n📦 EQUIPEMENT : {d.label}")
                 print(f"   Widget: {d.widget} | UI Class: {d.ui_class}")
