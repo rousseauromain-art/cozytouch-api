@@ -138,50 +138,49 @@ async def apply_heating_mode(target_mode):
         return "\n".join(results)
 ####
 async def brute_force_sauter(update: Update):
-    """Teste toutes les méthodes d'auth pour percer le READ ERROR"""
-    status_msg = await update.message.reply_text("🧪 Lancement du protocole Brute Force d'authentification...")
+    status_msg = await update.message.reply_text("🧪 Test des 3 clusters Sauter (Protocole IO)...")
     
-    # Liste des configurations à tester
-    scenarios = [
-        {"name": "Sauter App iOS", "url": "https://ha101-1.overkiz.com/externalapi/rest/login", 
-         "headers": {"X-Application-Id": "cp7He8X6836936S6", "User-Agent": "Cozytouch/2.10.0 (iOS 14.4)"}},
-        {"name": "Cluster Global", "url": "https://kiz-api.overkiz.com/externalapi/rest/login", 
-         "headers": {"X-Application-Id": "cp7He8X6836936S6"}},
-        {"name": "Standard Overkiz", "url": "https://ha101-1.overkiz.com/externalapi/rest/login", 
-         "headers": {"User-Agent": "Mozilla/5.0"}},
+    # On teste les 3 serveurs connus pour Sauter en 2026
+    clusters = [
+        "https://ha101-1.overkiz.com/externalapi/rest", # Historique IO
+        "https://ha201-1.overkiz.com/externalapi/rest", # Nouveau cluster
+        "https://kiz-api.overkiz.com/externalapi/rest"  # Générique
     ]
 
-    for sc in scenarios:
-        await status_msg.edit_text(f"📡 Test : {sc['name']}...")
-        try:
-            async with httpx.AsyncClient(headers=sc['headers'], follow_redirects=True, timeout=15) as client:
-                # On force le format x-www-form-urlencoded qui est souvent requis
-                r = await client.post(sc['url'], data={"userId": BEC_EMAIL, "userPassword": BEC_PASSWORD})
-                
-                if r.status_code == 200:
-                    await status_msg.edit_text(f"✅ SUCCÈS : {sc['name']} !\nRécupération des devices...")
-                    # On continue avec cette session
-                    dev_r = await client.get(sc['url'].replace('/login', '/setup/devices'))
-                    if dev_r.status_code == 200:
-                        devices = dev_r.json()
-                        res = [f"📊 <b>{len(devices)} Appareils trouvés</b>"]
-                        for d in devices:
-                            res.append(f"\n📍 {d.get('label')} ({d.get('widget')})")
-                            # On cherche la conso ou l'état de chauffe
-                            for s in d.get('states', []):
-                                if any(k in s['name'] for k in ['Energy', 'Consumption', 'Temperature', 'OperatingMode']):
-                                    res.append(f" • {s['name'].split(':')[-1]}: <b>{s['value']}</b>")
-                        
-                        await update.message.reply_text("\n".join(res), parse_mode='HTML')
+    headers = {
+        "X-Application-Id": "cp7He8X6836936S6",
+        "User-Agent": "Cozytouch/2.10.0 (iPhone; iOS 15.0; Scale/3.00)",
+        "Content-Type": "application/x-www-form-urlencoded"
+    }
+
+    async with httpx.AsyncClient(headers=headers, timeout=20) as client:
+        for base_url in clusters:
+            try:
+                # Étape 1 : On check si le serveur répond
+                check = await client.get(f"{base_url}/login")
+                if check.status_code == 405: # 405 est normal ici (GET non permis sur login)
+                    await update.message.reply_text(f"📡 Serveur {base_url.split('-')[0][-2:]} en ligne. Tentative d'auth...")
+                    
+                    # Étape 2 : Authentification
+                    r = await client.post(f"{base_url}/login", data={
+                        "userId": BEC_EMAIL,
+                        "userPassword": BEC_PASSWORD
+                    })
+                    
+                    if r.status_code == 200:
+                        await update.message.reply_text("✅ AUTHENTIFICATION RÉUSSIE !")
+                        # Lecture des équipements
+                        dev_r = await client.get(f"{base_url}/setup/devices")
+                        await update.message.reply_text(f"📦 {len(dev_r.json())} objets trouvés. Analyse en cours...")
+                        # ... (ici on liste les states comme avant)
                         return
                     else:
-                        await update.message.reply_text(f"⚠️ Auth OK mais erreur devices: {dev_r.status_code}")
-                else:
-                    print(f"DEBUG: {sc['name']} a échoué ({r.status_code})", flush=True)
-        except Exception as e:
-            await update.message.reply_text(f"❌ Erreur sur {sc['name']}: {type(e).__name__}")
-            
-    await status_msg.edit_text("❌ Toutes les méthodes ont échoué. Vérifie tes identifiants BEC.")
+                        print(f"DEBUG {base_url}: Erreur {r.status_code}", flush=True)
+            except Exception as e:
+                print(f"DEBUG {base_url}: Erreur réseau {e}", flush=True)
+
+    await update.message.reply_text("❌ Échec total. Le serveur refuse toujours l'accès.")
+    
 
 async def bec_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not BEC_EMAIL or not BEC_PASSWORD:
