@@ -137,70 +137,74 @@ async def apply_heating_mode(target_mode):
                 except: results.append(f"❌ <b>{info['name']}</b> : Erreur")
         return "\n".join(results)
 ####
+
 async def bec_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     email = os.getenv("BEC_EMAIL")
     password = os.getenv("BEC_PASSWORD")
     
     if not email or not password:
-        await update.message.reply_text("❌ Variables BEC manquantes sur Koyeb.")
+        await update.message.reply_text("❌ Variables BEC manquantes.")
         return
 
-    msg = await update.message.reply_text("📡 Tentative de connexion furtive (Sauter)...")
+    msg = await update.message.reply_text("📡 Tentative d'accès au cluster Sauter spécifique...")
 
-    # Configuration rigoureuse pour éviter le READ ERROR
+    # Liste des URLs à tester pour éviter le 404
+    # La première est l'URL moderne pour Sauter Cozytouch
+    endpoints = [
+        "https://ha101-1.overkiz.com/externalapi/rest",
+        "https://kiz-api.overkiz.com/externalapi/rest"
+    ]
+
     headers = {
-        "User-Agent": "Cozytouch/2.10.0 (com.groupe-muller.cozytouch.sauter; build:2021051901; iOS 14.4.0) Alamofire/5.4.1",
         "X-Application-Id": "cp7He8X6836936S6",
-        "Content-Type": "application/x-www-form-urlencoded",
-        "Accept": "*/*"
+        "Content-Type": "application/x-www-form-urlencoded"
     }
 
     try:
-        # On utilise une limite de temps plus longue et on force le HTTP/1.1
-        async with httpx.AsyncClient(headers=headers, follow_redirects=True, timeout=30.0) as client:
-            
-            # 1. LOGIN (Format form-urlencoded)
-            login_data = {
-                "userId": email,
-                "userPassword": password
-            }
-            
-            # Test sur l'endpoint alternatif qui résout souvent les Read Errors
-            url_login = "https://ha101-1.overkiz.com/externalapi/rest/login"
-            
-            response = await client.post(url_login, data=login_data)
-            
-            if response.status_code != 200:
-                await msg.edit_text(f"❌ Rejet Serveur ({response.status_code})\n{response.text[:50]}")
+        async with httpx.AsyncClient(headers=headers, follow_redirects=True, timeout=20.0) as client:
+            logged_in = False
+            base_url_found = ""
+
+            for url in endpoints:
+                print(f"DEBUG: Test login sur {url}/login")
+                try:
+                    r = await client.post(f"{url}/login", data={"userId": email, "userPassword": password})
+                    if r.status_code == 200:
+                        logged_in = True
+                        base_url_found = url
+                        break
+                    else:
+                        print(f"DEBUG: {url} a répondu {r.status_code}")
+                except Exception as e:
+                    print(f"DEBUG: Erreur sur {url}: {e}")
+
+            if not logged_in:
+                await msg.edit_text("❌ Échec : Le serveur rejette l'accès (401 ou 404).\nVérifie que ton compte est bien un compte SAUTER.")
                 return
 
-            # 2. RÉCUPÉRATION DES APPAREILS
-            await msg.edit_text("✅ Auth réussie ! Lecture du ballon...")
+            # Si on arrive ici, on est connecté
+            await msg.edit_text(f"✅ Connecté via {base_url_found.split('//')[1]} !")
             
-            # On change le header pour la suite
+            # Récupération des équipements
             client.headers.update({"Content-Type": "application/json"})
-            dev_res = await client.get("https://ha101-1.overkiz.com/externalapi/rest/setup/devices")
+            r_dev = await client.get(f"{base_url_found}/setup/devices")
             
-            if dev_res.status_code == 200:
-                devices = dev_res.json()
-                res = [f"✅ {len(devices)} appareils trouvés."]
+            if r_dev.status_code == 200:
+                devices = r_dev.json()
+                res = [f"✅ <b>{len(devices)} équipements</b> trouvés.\n"]
                 for d in devices:
-                    # On cherche spécifiquement le ballon (DHW ou Water)
-                    if any(x in d.get('uiClass', '') or x in d.get('widget', '') for x in ['Water', 'DHW']):
-                        res.append(f"\n💧 <b>{d.get('label')}</b>")
-                        for s in d.get('states', []):
-                            # On ne prend que l'essentiel pour Telegram
-                            if any(k in s['name'] for k in ['Temperature', 'Energy', 'Power', 'Capacity']):
-                                res.append(f"• {s['name'].split(':')[-1]}: <b>{s['value']}</b>")
+                    # On affiche le label pour être sûr qu'on voit le ballon
+                    res.append(f"📍 {d.get('label')} (<i>{d.get('widget')}</i>)")
+                    # On affiche TOUS les noms de states pour t'aider à identifier
+                    states = [s['name'].split(':')[-1] for s in d.get('states', [])]
+                    res.append(f"   States: <code>{', '.join(states[:5])}...</code>")
                 
                 await msg.edit_text("\n".join(res), parse_mode='HTML')
             else:
-                await msg.edit_text(f"❌ Erreur lecture (Code {dev_res.status_code})")
+                await msg.edit_text(f"❌ Erreur lecture devices : {r_dev.status_code}")
 
-    except httpx.ReadError:
-        await msg.edit_text("❌ READ ERROR : Le serveur Sauter a coupé la connexion. Tentative de contournement nécessaire.")
     except Exception as e:
-        await msg.edit_text(f"💥 Erreur : `{type(e).__name__}`")
+        await msg.edit_text(f"💥 Erreur critique : {str(e)}")
         
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
