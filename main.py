@@ -137,6 +137,88 @@ async def apply_heating_mode(target_mode):
                 except: results.append(f"❌ <b>{info['name']}</b> : Erreur")
         return "\n".join(results)
 ####
+# --- MOTEUR DE BRUTE FORCE (UNIFORMISÉ) ---
+async def try_sauter_auth(client, base_url, email, password, use_json=False):
+    """Tente une combinaison précise d'authentification"""
+    try:
+        url = f"{base_url}/login"
+        payload = {"userId": email, "userPassword": password}
+        
+        if use_json:
+            r = await client.post(url, json=payload, timeout=15)
+        else:
+            r = await client.post(url, data=payload, timeout=15)
+            
+        return r if r.status_code == 200 else None
+    except:
+        return None
+        # --- LE HANDLER /bec ---
+async def bec_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not BEC_EMAIL or not BEC_PASSWORD:
+        await update.message.reply_text("❌ Variables BEC manquantes dans Koyeb.")
+        return
+
+    msg = await update.message.reply_text("🔎 Lancement du Protocole Brute Force Sauter...")
+
+    # Paramètres de test
+    clusters = [
+        "https://ha101-1.overkiz.com/externalapi/rest",
+        "https://ha201-1.overkiz.com/externalapi/rest",
+        "https://kiz-api.overkiz.com/externalapi/rest"
+    ]
+    
+    user_agents = [
+        "Cozytouch/2.10.0 (iPhone; iOS 15.0)",
+        "Mozilla/5.0 (Sauter-Cozytouch-App)",
+        "Alamofire/5.4.1"
+    ]
+
+    found = False
+    
+    # On utilise un seul client pour gérer les cookies de session automatiquement
+    async with httpx.AsyncClient(follow_redirects=True) as client:
+        for url in clusters:
+            if found: break
+            cluster_name = url.split('//')[1].split('.')[0]
+            
+            for ua in user_agents:
+                if found: break
+                client.headers.update({
+                    "X-Application-Id": "cp7He8X6836936S6",
+                    "User-Agent": ua
+                })
+                
+                # Test 1: Méthode FORM (Standard)
+                await msg.edit_text(f"📡 Test [{cluster_name}] - UA: {ua[:10]} - Mode: FORM")
+                resp = await try_sauter_auth(client, url, BEC_EMAIL, BEC_PASSWORD, use_json=False)
+                
+                # Test 2: Méthode JSON (si FORM échoue)
+                if not resp:
+                    await msg.edit_text(f"📡 Test [{cluster_name}] - UA: {ua[:10]} - Mode: JSON")
+                    resp = await try_sauter_auth(client, url, BEC_EMAIL, BEC_PASSWORD, use_json=True)
+
+                if resp:
+                    await msg.edit_text(f"✅ SUCCÈS sur {cluster_name} !\nLecture des équipements...")
+                    
+                    # Récupération des données
+                    r_dev = await client.get(f"{url}/setup/devices")
+                    if r_dev.status_code == 200:
+                        devices = r_dev.json()
+                        res = [f"📊 <b>{len(devices)} appareils trouvés</b>"]
+                        for d in devices:
+                            res.append(f"\n📍 <b>{d.get('label')}</b> ({d.get('widget')})")
+                            for s in d.get('states', []):
+                                name = s['name'].split(':')[-1]
+                                if any(k in name for k in ['Energy', 'Consumption', 'Temperature', 'Mode']):
+                                    res.append(f" • {name}: <code>{s['value']}</code>")
+                        
+                        await update.message.reply_text("\n".join(res), parse_mode='HTML')
+                        found = True
+                    break
+
+    if not found:
+        await msg.edit_text("❌ Échec total. Aucune combinaison n'a fonctionné.\nVérifie tes identifiants ou un éventuel blocage IP (attendre 15min).")
+        
 async def brute_force_sauter(update: Update):
     status_msg = await update.message.reply_text("🧪 Test des 3 clusters Sauter (Protocole IO)...")
     
@@ -187,7 +269,10 @@ async def bec_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("❌ Variables BEC_EMAIL/PASSWORD manquantes sur Koyeb.")
         return
     await brute_force_sauter(update)
-    
+
+# --- BOILERPLATE (HEALTH & MAIN) ---
+class Health(BaseHTTPRequestHandler):
+    def do_GET(self): self.send_response(200); self.end_headers(); self.wfile.write(b"OK")
 
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
