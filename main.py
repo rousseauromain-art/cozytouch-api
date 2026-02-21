@@ -229,7 +229,7 @@ def main():
     threading.Thread(target=lambda: HTTPServer(('0.0.0.0', 8000), Health).serve_forever(), daemon=True).start()
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", lambda u,c: u.message.reply_text(f"🚀 Pilotage v{VERSION}", reply_markup=get_keyboard())))
-    app.add_handler(CommandHandler("bec", bec_handler))
+    app.add_handler(CommandHandler("bec", bec_command_handler ))
     print(f"Bot v{VERSION} démarré...", flush=True)
     app.run_polling(drop_pending_updates=True)
     app.add_handler(CallbackQueryHandler(button_handler))
