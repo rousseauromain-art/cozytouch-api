@@ -183,6 +183,14 @@ async def brute_force_sauter(update: Update):
             
     await status_msg.edit_text("❌ Toutes les méthodes ont échoué. Vérifie tes identifiants BEC.")
 
+async def bec_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not BEC_EMAIL or not BEC_PASSWORD:
+        await update.message.reply_text("❌ Variables BEC_EMAIL/PASSWORD manquantes sur Koyeb.")
+        return
+    await brute_force_sauter(update)
+    
+
+
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -223,6 +231,8 @@ def main():
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", lambda u,c: u.message.reply_text(f"🚀 Pilotage v{VERSION}", reply_markup=get_keyboard())))
     app.add_handler(CommandHandler("bec", bec_handler))
+    print(f"Bot v{VERSION} démarré...", flush=True)
+    app.run_polling(drop_pending_updates=True)
     app.add_handler(CallbackQueryHandler(button_handler))
     loop = asyncio.get_event_loop()
     loop.create_task(background_logger())
