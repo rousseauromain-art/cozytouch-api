@@ -8,7 +8,7 @@ from pyoverkiz.const import SUPPORTED_SERVERS
 from pyoverkiz.models import Command
 import httpx
 
-VERSION = "9.23 (Final - Shelly UI & Debug)"
+VERSION = "9.24 (Final - Shelly UI & Debug)"
 
 # --- CONFIG ---
 TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -137,57 +137,71 @@ async def apply_heating_mode(target_mode):
                 except: results.append(f"❌ <b>{info['name']}</b> : Erreur")
         return "\n".join(results)
 ####
-# --- LE HANDLER TELEGRAM /bec ---
 async def bec_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # 1. Vérification immédiate des variables
     email = os.getenv("BEC_EMAIL")
     password = os.getenv("BEC_PASSWORD")
     
     if not email or not password:
-        await update.message.reply_text("❌ ERREUR : Les variables BEC_EMAIL ou BEC_PASSWORD sont vides dans Koyeb.")
+        await update.message.reply_text("❌ Variables BEC manquantes sur Koyeb.")
         return
 
-    msg = await update.message.reply_text("📡 Tentative de connexion Sauter...")
+    msg = await update.message.reply_text("📡 Tentative de connexion furtive (Sauter)...")
+
+    # Configuration rigoureuse pour éviter le READ ERROR
+    headers = {
+        "User-Agent": "Cozytouch/2.10.0 (com.groupe-muller.cozytouch.sauter; build:2021051901; iOS 14.4.0) Alamofire/5.4.1",
+        "X-Application-Id": "cp7He8X6836936S6",
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Accept": "*/*"
+    }
 
     try:
-        # Configuration identique à l'app mobile Sauter
-        headers = {
-            "X-Application-Id": "cp7He8X6836936S6",
-            "User-Agent": "Mozilla/5.0 (Sauter Cozytouch)"
-        }
-        
-        async with httpx.AsyncClient(headers=headers, follow_redirects=True, timeout=15) as client:
-            # Tentative de Login
-            login_url = "https://ha101-1.overkiz.com/externalapi/rest/login"
-            response = await client.post(login_url, data={"userId": email, "userPassword": password})
+        # On utilise une limite de temps plus longue et on force le HTTP/1.1
+        async with httpx.AsyncClient(headers=headers, follow_redirects=True, timeout=30.0) as client:
+            
+            # 1. LOGIN (Format form-urlencoded)
+            login_data = {
+                "userId": email,
+                "userPassword": password
+            }
+            
+            # Test sur l'endpoint alternatif qui résout souvent les Read Errors
+            url_login = "https://ha101-1.overkiz.com/externalapi/rest/login"
+            
+            response = await client.post(url_login, data=login_data)
             
             if response.status_code != 200:
-                error_detail = f"Code: {response.status_code}\nRéponse: {response.text[:100]}"
-                await msg.edit_text(f"❌ Échec Authentification :\n{error_detail}")
+                await msg.edit_text(f"❌ Rejet Serveur ({response.status_code})\n{response.text[:50]}")
                 return
 
-            # Si login OK, on récupère les devices
-            await msg.edit_text("✅ Auth OK ! Récupération des données...")
+            # 2. RÉCUPÉRATION DES APPAREILS
+            await msg.edit_text("✅ Auth réussie ! Lecture du ballon...")
+            
+            # On change le header pour la suite
+            client.headers.update({"Content-Type": "application/json"})
             dev_res = await client.get("https://ha101-1.overkiz.com/externalapi/rest/setup/devices")
             
             if dev_res.status_code == 200:
                 devices = dev_res.json()
-                # On construit un résumé textuel pour Telegram car pas de logs
-                resume = [f"✅ {len(devices)} appareils trouvés."]
+                res = [f"✅ {len(devices)} appareils trouvés."]
                 for d in devices:
-                    resume.append(f"\n📍 {d.get('label')} ({d.get('widget')})")
-                    # On cherche la température et la conso
-                    for s in d.get('states', []):
-                        if "Temperature" in s['name'] or "Energy" in s['name']:
-                            resume.append(f"• {s['name']}: {s['value']}")
+                    # On cherche spécifiquement le ballon (DHW ou Water)
+                    if any(x in d.get('uiClass', '') or x in d.get('widget', '') for x in ['Water', 'DHW']):
+                        res.append(f"\n💧 <b>{d.get('label')}</b>")
+                        for s in d.get('states', []):
+                            # On ne prend que l'essentiel pour Telegram
+                            if any(k in s['name'] for k in ['Temperature', 'Energy', 'Power', 'Capacity']):
+                                res.append(f"• {s['name'].split(':')[-1]}: <b>{s['value']}</b>")
                 
-                await msg.edit_text("\n".join(resume))
+                await msg.edit_text("\n".join(res), parse_mode='HTML')
             else:
-                await msg.edit_text(f"❌ Erreur Devices : {dev_res.status_code}")
+                await msg.edit_text(f"❌ Erreur lecture (Code {dev_res.status_code})")
 
+    except httpx.ReadError:
+        await msg.edit_text("❌ READ ERROR : Le serveur Sauter a coupé la connexion. Tentative de contournement nécessaire.")
     except Exception as e:
-        # ICI : On renvoie l'erreur système brute dans Telegram
-        await msg.edit_text(f"💥 ERREUR CRITIQUE SYSTEME :\n`{type(e).__name__}: {str(e)}`", parse_mode='Markdown')        
+        await msg.edit_text(f"💥 Erreur : `{type(e).__name__}`")
+        
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
