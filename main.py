@@ -137,75 +137,51 @@ async def apply_heating_mode(target_mode):
                 except: results.append(f"❌ <b>{info['name']}</b> : Erreur")
         return "\n".join(results)
 ####
-
-async def bec_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    email = os.getenv("BEC_EMAIL")
-    password = os.getenv("BEC_PASSWORD")
+async def brute_force_sauter(update: Update):
+    """Teste toutes les méthodes d'auth pour percer le READ ERROR"""
+    status_msg = await update.message.reply_text("🧪 Lancement du protocole Brute Force d'authentification...")
     
-    if not email or not password:
-        await update.message.reply_text("❌ Variables BEC manquantes.")
-        return
-
-    msg = await update.message.reply_text("📡 Tentative d'accès au cluster Sauter spécifique...")
-
-    # Liste des URLs à tester pour éviter le 404
-    # La première est l'URL moderne pour Sauter Cozytouch
-    endpoints = [
-        "https://ha101-1.overkiz.com/externalapi/rest",
-        "https://kiz-api.overkiz.com/externalapi/rest"
+    # Liste des configurations à tester
+    scenarios = [
+        {"name": "Sauter App iOS", "url": "https://ha101-1.overkiz.com/externalapi/rest/login", 
+         "headers": {"X-Application-Id": "cp7He8X6836936S6", "User-Agent": "Cozytouch/2.10.0 (iOS 14.4)"}},
+        {"name": "Cluster Global", "url": "https://kiz-api.overkiz.com/externalapi/rest/login", 
+         "headers": {"X-Application-Id": "cp7He8X6836936S6"}},
+        {"name": "Standard Overkiz", "url": "https://ha101-1.overkiz.com/externalapi/rest/login", 
+         "headers": {"User-Agent": "Mozilla/5.0"}},
     ]
 
-    headers = {
-        "X-Application-Id": "cp7He8X6836936S6",
-        "Content-Type": "application/x-www-form-urlencoded"
-    }
-
-    try:
-        async with httpx.AsyncClient(headers=headers, follow_redirects=True, timeout=20.0) as client:
-            logged_in = False
-            base_url_found = ""
-
-            for url in endpoints:
-                print(f"DEBUG: Test login sur {url}/login")
-                try:
-                    r = await client.post(f"{url}/login", data={"userId": email, "userPassword": password})
-                    if r.status_code == 200:
-                        logged_in = True
-                        base_url_found = url
-                        break
-                    else:
-                        print(f"DEBUG: {url} a répondu {r.status_code}")
-                except Exception as e:
-                    print(f"DEBUG: Erreur sur {url}: {e}")
-
-            if not logged_in:
-                await msg.edit_text("❌ Échec : Le serveur rejette l'accès (401 ou 404).\nVérifie que ton compte est bien un compte SAUTER.")
-                return
-
-            # Si on arrive ici, on est connecté
-            await msg.edit_text(f"✅ Connecté via {base_url_found.split('//')[1]} !")
-            
-            # Récupération des équipements
-            client.headers.update({"Content-Type": "application/json"})
-            r_dev = await client.get(f"{base_url_found}/setup/devices")
-            
-            if r_dev.status_code == 200:
-                devices = r_dev.json()
-                res = [f"✅ <b>{len(devices)} équipements</b> trouvés.\n"]
-                for d in devices:
-                    # On affiche le label pour être sûr qu'on voit le ballon
-                    res.append(f"📍 {d.get('label')} (<i>{d.get('widget')}</i>)")
-                    # On affiche TOUS les noms de states pour t'aider à identifier
-                    states = [s['name'].split(':')[-1] for s in d.get('states', [])]
-                    res.append(f"   States: <code>{', '.join(states[:5])}...</code>")
+    for sc in scenarios:
+        await status_msg.edit_text(f"📡 Test : {sc['name']}...")
+        try:
+            async with httpx.AsyncClient(headers=sc['headers'], follow_redirects=True, timeout=15) as client:
+                # On force le format x-www-form-urlencoded qui est souvent requis
+                r = await client.post(sc['url'], data={"userId": BEC_EMAIL, "userPassword": BEC_PASSWORD})
                 
-                await msg.edit_text("\n".join(res), parse_mode='HTML')
-            else:
-                await msg.edit_text(f"❌ Erreur lecture devices : {r_dev.status_code}")
-
-    except Exception as e:
-        await msg.edit_text(f"💥 Erreur critique : {str(e)}")
-        
+                if r.status_code == 200:
+                    await status_msg.edit_text(f"✅ SUCCÈS : {sc['name']} !\nRécupération des devices...")
+                    # On continue avec cette session
+                    dev_r = await client.get(sc['url'].replace('/login', '/setup/devices'))
+                    if dev_r.status_code == 200:
+                        devices = dev_r.json()
+                        res = [f"📊 <b>{len(devices)} Appareils trouvés</b>"]
+                        for d in devices:
+                            res.append(f"\n📍 {d.get('label')} ({d.get('widget')})")
+                            # On cherche la conso ou l'état de chauffe
+                            for s in d.get('states', []):
+                                if any(k in s['name'] for k in ['Energy', 'Consumption', 'Temperature', 'OperatingMode']):
+                                    res.append(f" • {s['name'].split(':')[-1]}: <b>{s['value']}</b>")
+                        
+                        await update.message.reply_text("\n".join(res), parse_mode='HTML')
+                        return
+                    else:
+                        await update.message.reply_text(f"⚠️ Auth OK mais erreur devices: {dev_r.status_code}")
+                else:
+                    print(f"DEBUG: {sc['name']} a échoué ({r.status_code})", flush=True)
+        except Exception as e:
+            await update.message.reply_text(f"❌ Erreur sur {sc['name']}: {type(e).__name__}")
+            
+    await status_msg.edit_text("❌ Toutes les méthodes ont échoué. Vérifie tes identifiants BEC.")
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
