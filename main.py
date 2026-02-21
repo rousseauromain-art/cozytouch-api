@@ -1,4 +1,3 @@
-import socket
 import os, asyncio, threading, httpx, psycopg2
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -6,9 +5,8 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Cont
 from pyoverkiz.client import OverkizClient
 from pyoverkiz.const import SUPPORTED_SERVERS
 from pyoverkiz.models import Command
-import httpx
 
-VERSION = "9.24 (Final - Shelly UI & Debug)"
+VERSION = "9.22 (Final - Shelly UI & Debug)"
 
 # --- CONFIG ---
 TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -19,13 +17,6 @@ SHELLY_TOKEN = os.getenv("SHELLY_TOKEN")
 SHELLY_ID = os.getenv("SHELLY_ID")
 SHELLY_SERVER = os.getenv("SHELLY_SERVER", "shelly-209-eu.shelly.cloud")
 DB_URL = os.getenv("DATABASE_URL")
-# --- CONFIG BEC (CozySauter) ---
-# Utilisation des variables confirmées
-EMAIL_BEC = os.getenv("BEC_EMAIL")
-PASS_BEC = os.getenv("BEC_PASSWORD")
-BEC_EMAIL = os.getenv("BEC_EMAIL")
-BEC_PASSWORD = os.getenv("BEC_PASSWORD")
-SERVER_BEC = "ha110-1.overkiz.com"
 
 CONFORT_VALS = {
     "14253355#1": {"name": "Salon", "temp": 19.5},
@@ -33,41 +24,6 @@ CONFORT_VALS = {
     "190387#1": {"name": "Bureau", "temp": 19.0},
     "4326513#1": {"name": "Sèche-Serviette", "temp": 19.5}
 }
-
-
-# --- CLASSE TECHNIQUE POUR LE BEC SAUTER ---
-class SauterAuth:
-    def __init__(self, email, password):
-        self.email = email
-        self.password = password
-        self.headers = {"X-Application-Id": "cp7He8X6836936S6"}
-        self.client = httpx.AsyncClient(headers=self.headers, follow_redirects=True, timeout=20)
-
-    async def get_data(self):
-        # Tentative de login + récupération immédiate
-        login_url = "https://ha101-1.overkiz.com/externalapi/rest/login"
-        r = await self.client.post(login_url, data={"userId": self.email, "userPassword": self.password})
-        if r.status_code == 200:
-            # Si login OK, on demande les appareils
-            dev_res = await self.client.get("https://ha101-1.overkiz.com/externalapi/rest/setup/devices")
-            return dev_res.json() if dev_res.status_code == 200 else None
-        print(f"DEBUG SAUTER ERR: {r.status_code} - {r.text}")
-        return None
-
-    async def login(self):
-        url = f"{self.base_url}/login"
-        payload = {"userId": self.email, "userPassword": self.password}
-        # On tente le login direct
-        r = await self.session.post(url, data=payload)
-        if r.status_code == 200:
-            print("✅ Connexion Sauter réussie via API Directe")
-            return True
-        print(f"❌ Échec Auth Sauter: {r.status_code} - {r.text}")
-        return False
-
-    async def get_devices(self):
-        r = await self.session.get(f"{self.base_url}/setup/devices")
-        return r.json() if r.status_code == 200 else []
 
 def init_db():
     if not DB_URL: return
@@ -136,144 +92,6 @@ async def apply_heating_mode(target_mode):
                     results.append(f"✅ <b>{info['name']}</b> : {t_val}°C")
                 except: results.append(f"❌ <b>{info['name']}</b> : Erreur")
         return "\n".join(results)
-####
-# --- MOTEUR DE BRUTE FORCE (UNIFORMISÉ) ---
-async def try_sauter_auth(client, base_url, email, password, use_json=False):
-    """Tente une combinaison précise d'authentification"""
-    try:
-        url = f"{base_url}/login"
-        payload = {"userId": email, "userPassword": password}
-        
-        if use_json:
-            r = await client.post(url, json=payload, timeout=15)
-        else:
-            r = await client.post(url, data=payload, timeout=15)
-            
-        return r if r.status_code == 200 else None
-    except:
-        return None
-        # --- LE HANDLER /bec ---
-async def bec_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not BEC_EMAIL or not BEC_PASSWORD:
-        await update.message.reply_text("❌ Variables BEC manquantes dans Koyeb.")
-        return
-
-    msg = await update.message.reply_text("🔎 Lancement du Protocole Brute Force Sauter...")
-
-    # Paramètres de test
-    clusters = [
-        "https://ha101-1.overkiz.com/externalapi/rest",
-        "https://ha201-1.overkiz.com/externalapi/rest",
-        "https://kiz-api.overkiz.com/externalapi/rest"
-    ]
-    
-    user_agents = [
-        "Cozytouch/2.10.0 (iPhone; iOS 15.0)",
-        "Mozilla/5.0 (Sauter-Cozytouch-App)",
-        "Alamofire/5.4.1"
-    ]
-
-    found = False
-    
-    # On utilise un seul client pour gérer les cookies de session automatiquement
-    async with httpx.AsyncClient(follow_redirects=True) as client:
-        for url in clusters:
-            if found: break
-            cluster_name = url.split('//')[1].split('.')[0]
-            
-            for ua in user_agents:
-                if found: break
-                client.headers.update({
-                    "X-Application-Id": "cp7He8X6836936S6",
-                    "User-Agent": ua
-                })
-                
-                # Test 1: Méthode FORM (Standard)
-                await msg.edit_text(f"📡 Test [{cluster_name}] - UA: {ua[:10]} - Mode: FORM")
-                resp = await try_sauter_auth(client, url, BEC_EMAIL, BEC_PASSWORD, use_json=False)
-                
-                # Test 2: Méthode JSON (si FORM échoue)
-                if not resp:
-                    await msg.edit_text(f"📡 Test [{cluster_name}] - UA: {ua[:10]} - Mode: JSON")
-                    resp = await try_sauter_auth(client, url, BEC_EMAIL, BEC_PASSWORD, use_json=True)
-
-                if resp:
-                    await msg.edit_text(f"✅ SUCCÈS sur {cluster_name} !\nLecture des équipements...")
-                    
-                    # Récupération des données
-                    r_dev = await client.get(f"{url}/setup/devices")
-                    if r_dev.status_code == 200:
-                        devices = r_dev.json()
-                        res = [f"📊 <b>{len(devices)} appareils trouvés</b>"]
-                        for d in devices:
-                            res.append(f"\n📍 <b>{d.get('label')}</b> ({d.get('widget')})")
-                            for s in d.get('states', []):
-                                name = s['name'].split(':')[-1]
-                                if any(k in name for k in ['Energy', 'Consumption', 'Temperature', 'Mode']):
-                                    res.append(f" • {name}: <code>{s['value']}</code>")
-                        
-                        await update.message.reply_text("\n".join(res), parse_mode='HTML')
-                        found = True
-                    break
-
-    if not found:
-        await msg.edit_text("❌ Échec total. Aucune combinaison n'a fonctionné.\nVérifie tes identifiants ou un éventuel blocage IP (attendre 15min).")
-        
-async def brute_force_sauter(update: Update):
-    status_msg = await update.message.reply_text("🧪 Test des 3 clusters Sauter (Protocole IO)...")
-    
-    # On teste les 3 serveurs connus pour Sauter en 2026
-    clusters = [
-        "https://ha101-1.overkiz.com/externalapi/rest", # Historique IO
-        "https://ha201-1.overkiz.com/externalapi/rest", # Nouveau cluster
-        "https://kiz-api.overkiz.com/externalapi/rest"  # Générique
-    ]
-
-    headers = {
-        "X-Application-Id": "cp7He8X6836936S6",
-        "User-Agent": "Cozytouch/2.10.0 (iPhone; iOS 15.0; Scale/3.00)",
-        "Content-Type": "application/x-www-form-urlencoded"
-    }
-
-    async with httpx.AsyncClient(headers=headers, timeout=20) as client:
-        for base_url in clusters:
-            try:
-                # Étape 1 : On check si le serveur répond
-                check = await client.get(f"{base_url}/login")
-                if check.status_code == 405: # 405 est normal ici (GET non permis sur login)
-                    await update.message.reply_text(f"📡 Serveur {base_url.split('-')[0][-2:]} en ligne. Tentative d'auth...")
-                    
-                    # Étape 2 : Authentification
-                    r = await client.post(f"{base_url}/login", data={
-                        "userId": BEC_EMAIL,
-                        "userPassword": BEC_PASSWORD
-                    })
-                    
-                    if r.status_code == 200:
-                        await update.message.reply_text("✅ AUTHENTIFICATION RÉUSSIE !")
-                        # Lecture des équipements
-                        dev_r = await client.get(f"{base_url}/setup/devices")
-                        await update.message.reply_text(f"📦 {len(dev_r.json())} objets trouvés. Analyse en cours...")
-                        # ... (ici on liste les states comme avant)
-                        return
-                    else:
-                        print(f"DEBUG {base_url}: Erreur {r.status_code}", flush=True)
-            except Exception as e:
-                print(f"DEBUG {base_url}: Erreur réseau {e}", flush=True)
-
-    await update.message.reply_text("❌ Échec total. Le serveur refuse toujours l'accès.")
-    
-
-async def bec_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not BEC_EMAIL or not BEC_PASSWORD:
-        await update.message.reply_text("❌ Variables BEC_EMAIL/PASSWORD manquantes sur Koyeb.")
-        return
-    await brute_force_sauter(update)
-
-# --- BOILERPLATE (HEALTH & MAIN) ---
-class Health(BaseHTTPRequestHandler):
-    def do_GET(self): self.send_response(200); self.end_headers(); self.wfile.write(b"OK")
-
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -314,9 +132,6 @@ def main():
     threading.Thread(target=lambda: HTTPServer(('0.0.0.0', 8000), Health).serve_forever(), daemon=True).start()
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", lambda u,c: u.message.reply_text(f"🚀 Pilotage v{VERSION}", reply_markup=get_keyboard())))
-    app.add_handler(CommandHandler("bec", bec_command_handler ))
-    print(f"Bot v{VERSION} démarré...", flush=True)
-    app.run_polling(drop_pending_updates=True)
     app.add_handler(CallbackQueryHandler(button_handler))
     loop = asyncio.get_event_loop()
     loop.create_task(background_logger())
