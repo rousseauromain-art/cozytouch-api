@@ -6,7 +6,7 @@ from pyoverkiz.client import OverkizClient
 from pyoverkiz.const import SUPPORTED_SERVERS
 from pyoverkiz.models import Command
 
-VERSION = "9.22 (Final - Shelly UI & Debug)"
+VERSION = "11.2 (Shelly + BEC Aquéo Séparé)"
 
 # --- CONFIG ---
 TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -18,6 +18,10 @@ SHELLY_ID = os.getenv("SHELLY_ID")
 SHELLY_SERVER = os.getenv("SHELLY_SERVER", "shelly-209-eu.shelly.cloud")
 DB_URL = os.getenv("DATABASE_URL")
 
+# Infos BEC (Sauter Aquéo Wi-Fi)
+BEC_EMAIL = os.getenv("BEC_EMAIL")
+BEC_PASSWORD = os.getenv("BEC_PASSWORD")
+
 CONFORT_VALS = {
     "14253355#1": {"name": "Salon", "temp": 19.5},
     "1640746#1": {"name": "Chambre", "temp": 19.0},
@@ -25,14 +29,43 @@ CONFORT_VALS = {
     "4326513#1": {"name": "Sèche-Serviette", "temp": 19.5}
 }
 
+# --- DATABASE ---
 def init_db():
     if not DB_URL: return
     try:
         conn = psycopg2.connect(DB_URL); cur = conn.cursor()
         cur.execute("CREATE TABLE IF NOT EXISTS temp_logs (id SERIAL PRIMARY KEY, timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP, room TEXT, temp_radiateur FLOAT, temp_shelly FLOAT, consigne FLOAT);")
+        cur.execute("CREATE TABLE IF NOT EXISTS bec_logs (id SERIAL PRIMARY KEY, timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP, energy FLOAT, capacity FLOAT);")
         conn.commit(); cur.close(); conn.close()
     except Exception as e: print(f"DB ERR: {e}")
 
+# --- MODULE BEC AQUÉO (ISOLÉ) ---
+async def manage_bec(action="GET"):
+    if not BEC_EMAIL or not BEC_PASSWORD: return None
+    try:
+        async with OverkizClient(BEC_EMAIL, BEC_PASSWORD, server=MY_SERVER) as client:
+            await client.login()
+            devices = await client.get_devices()
+            for d in devices:
+                if "Water" in d.widget or "Aqueo" in d.label:
+                    if action == "GET":
+                        states = {s.name: s.value for s in d.states}
+                        return {
+                            "label": d.label,
+                            "energy": states.get("core:ElectricEnergyConsumptionState"),
+                            "capacity": states.get("core:RemainingHotWaterCapacityState"),
+                            "mode": states.get("core:OperatingModeState")
+                        }
+                    elif action == "ABSENCE":
+                        await client.execute_commands(d.device_url, [Command("setOperatingMode", ["away"])])
+                        return "✅ Ballon mis en mode ABSENCE"
+                    elif action == "HOME":
+                        await client.execute_commands(d.device_url, [Command("setOperatingMode", ["auto"])])
+                        return "✅ Ballon remis en mode AUTO"
+    except Exception as e: print(f"BEC ERR: {e}")
+    return None
+
+# --- MODULE SHELLY ---
 async def get_shelly_temp():
     if not SHELLY_TOKEN: return None
     try:
@@ -41,6 +74,7 @@ async def get_shelly_temp():
             return r.json()['data']['device_status']['temperature:0']['tC']
     except: return None
 
+# --- DATA AGGREGATION & LOGGING ---
 async def get_current_data():
     async with OverkizClient(OVERKIZ_EMAIL, OVERKIZ_PASSWORD, server=MY_SERVER) as client:
         await client.login()
@@ -64,16 +98,19 @@ async def perform_record():
     try:
         data, shelly_t = await get_current_data()
         conn = psycopg2.connect(DB_URL); cur = conn.cursor()
-        count = 0
         for name, vals in data.items():
             if vals["temp"] is not None:
                 cur.execute("INSERT INTO temp_logs (room, temp_radiateur, temp_shelly, consigne) VALUES (%s, %s, %s, %s)",
                            (name, vals["temp"], (shelly_t if name=="Bureau" else None), vals["target"]))
-                count += 1
+        
+        bec = await manage_bec("GET")
+        if bec and bec.get("energy") is not None:
+            cur.execute("INSERT INTO bec_logs (energy, capacity) VALUES (%s, %s)", (bec["energy"], bec["capacity"]))
+            
         conn.commit(); cur.close(); conn.close()
-        print(f"DEBUG: Enregistrement auto réussi pour {count} pièces.")
     except Exception as e: print(f"RECORD ERR: {e}")
 
+# --- CHAUFFAGE LOGIC ---
 async def apply_heating_mode(target_mode):
     async with OverkizClient(OVERKIZ_EMAIL, OVERKIZ_PASSWORD, server=MY_SERVER) as client:
         await client.login()
@@ -93,13 +130,46 @@ async def apply_heating_mode(target_mode):
                 except: results.append(f"❌ <b>{info['name']}</b> : Erreur")
         return "\n".join(results)
 
+# --- BOT INTERFACE ---
+def get_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🏠 CHAUF. MAISON", callback_data="HOME"), InlineKeyboardButton("❄️ CHAUF. ABSENCE", callback_data="ABSENCE")],
+        [InlineKeyboardButton("🔍 ÉTAT", callback_data="LIST"), InlineKeyboardButton("💧 BALLON (BEC)", callback_data="BEC_MENU")],
+        [InlineKeyboardButton("📊 STATS 7J", callback_data="REPORT")]
+    ])
+
+def get_bec_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ BEC AUTO/ACTIF", callback_data="BEC_HOME"), InlineKeyboardButton("💤 BEC ABSENCE", callback_data="BEC_AWAY")],
+        [InlineKeyboardButton("⬅️ RETOUR", callback_data="BACK")]
+    ])
+
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    
     if query.data in ["HOME", "ABSENCE"]:
-        await query.edit_message_text(f"⏳ Activation {query.data}...")
+        await query.edit_message_text(f"⏳ Activation Chauffage {query.data}...")
         report = await apply_heating_mode(query.data)
-        await query.edit_message_text(f"<b>RÉSULTAT {query.data}</b>\n\n{report}", parse_mode='HTML', reply_markup=get_keyboard())
+        await query.edit_message_text(f"<b>RÉSULTAT CHAUFFAGE</b>\n\n{report}", parse_mode='HTML', reply_markup=get_keyboard())
+    
+    elif query.data == "BEC_MENU":
+        await query.edit_message_text("💧 Lecture du Ballon...")
+        bec = await manage_bec("GET")
+        if bec:
+            msg = f"💧 <b>{bec['label']}</b>\n🔋 Capacité : {bec['capacity']}%\n⚡ Mode : <code>{bec['mode']}</code>"
+            await query.edit_message_text(msg, parse_mode='HTML', reply_markup=get_bec_keyboard())
+        else:
+            await query.edit_message_text("❌ Erreur connexion BEC.", reply_markup=get_keyboard())
+
+    elif query.data == "BEC_HOME":
+        res = await manage_bec("HOME")
+        await query.edit_message_text(res or "❌ Erreur", reply_markup=get_keyboard())
+
+    elif query.data == "BEC_AWAY":
+        res = await manage_bec("ABSENCE")
+        await query.edit_message_text(res or "❌ Erreur", reply_markup=get_keyboard())
+
     elif query.data == "LIST":
         await query.edit_message_text("🔍 Lecture...")
         data, shelly_t = await get_current_data()
@@ -107,17 +177,18 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for n, v in data.items():
             lines.append(f"📍 <b>{n}</b>: {v['temp']}°C (Cible: {v['target']}°C)")
             if n == "Bureau" and shelly_t:
-                lines.append(f"   └ 🌡️ <i>Shelly : {shelly_t}°C</i>")
+                lines.append(f"    └ 🌡️ <i>Shelly : {shelly_t}°C</i>")
         await query.edit_message_text("🌡️ <b>ÉTAT ACTUEL</b>\n\n" + "\n".join(lines), parse_mode='HTML', reply_markup=get_keyboard())
+
     elif query.data == "REPORT":
         conn = psycopg2.connect(DB_URL); cur = conn.cursor()
         cur.execute("SELECT AVG(temp_radiateur), AVG(temp_shelly), AVG(temp_shelly - temp_radiateur), COUNT(*) FROM temp_logs WHERE room = 'Bureau' AND timestamp > NOW() - INTERVAL '7 days' AND temp_shelly IS NOT NULL;")
         s = cur.fetchone(); cur.close(); conn.close()
         msg = f"📊 <b>BILAN 7J (Bureau)</b>\nRad: {s[0]:.1f}°C / Shelly: {s[1]:.1f}°C\n<b>Δ: {s[2]:+.1f}°C</b>\n<i>{s[3]} mesures en base.</i>" if s and s[3]>0 else "⚠️ Pas de données."
         await query.message.reply_text(msg, parse_mode='HTML')
-
-def get_keyboard():
-    return InlineKeyboardMarkup([[InlineKeyboardButton("🏠 MAISON", callback_data="HOME"), InlineKeyboardButton("❄️ ABSENCE", callback_data="ABSENCE")],[InlineKeyboardButton("🔍 ÉTAT", callback_data="LIST"), InlineKeyboardButton("📊 STATS 7J", callback_data="REPORT")]])
+    
+    elif query.data == "BACK":
+        await query.edit_message_text("🏠 Menu Principal", reply_markup=get_keyboard())
 
 async def background_logger():
     while True:
