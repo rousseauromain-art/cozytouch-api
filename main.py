@@ -43,7 +43,7 @@ def init_db():
 async def manage_bec(action="GET"):
     if not BEC_EMAIL or not BEC_PASSWORD: return None
     try:
-        async with OverkizClient(BEC_EMAIL, BEC_PASSWORD, server=MY_SERVER) as client:
+        async with OverkizClient(BEC_EMAIL, BEC_PASSWORD, server=MY_SERVER,application_id="cp7He8X6836936S6") as client:
             await client.login()
             devices = await client.get_devices()
             for d in devices:
