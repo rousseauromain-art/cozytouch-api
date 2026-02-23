@@ -41,65 +41,70 @@ def init_db():
 
 # --- MODULE BEC AQUÉO (ISOLÉ) ---
 async def manage_bec(action="GET"):
-    if not BEC_EMAIL or not BEC_PASSWORD: 
-        print("DEBUG BEC: Variables manquantes", flush=True)
-        return None
-
-    # On récupère l'objet serveur SAUTER
-    sauter_server = SUPPORTED_SERVERS["sauter_cozytouch"]
+    if not BEC_EMAIL or not BEC_PASSWORD: return None
     
-    print(f"DEBUG BEC: Tentative avec Serveur: {sauter_server.name} | URL: {sauter_server.endpoint}", flush=True)
+    # Nouvel URL de login pour les comptes Wi-Fi natifs
+    base_url = "https://ha101-1.overkiz.com/externalapi/rest"
+    
+    # Headers "officiels" pour bypasser l'erreur GACOMA
+    headers = {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "X-Application-Id": "cp7He8X6836936S6", # On le remet ici en dur
+        "User-Agent": "Cozytouch/2.10.0 (iPhone; iOS 15.0)"
+    }
 
     try:
-        # On instancie le client
-        async with OverkizClient(
-            username=BEC_EMAIL,
-            password=BEC_PASSWORD,
-            server=sauter_server
-        ) as client:
+        async with httpx.AsyncClient(headers=headers, timeout=20.0, follow_redirects=True) as client:
+            # 1. LOGIN DIRECT (Méthode Form-Encoded recommandée par Jeedom)
+            payload = {
+                "userId": BEC_EMAIL,
+                "userPassword": BEC_PASSWORD
+            }
             
-            # --- VERBOSITÉ / DEBUG ---
-            print(f"DEBUG BEC: ID avant forçage: {client.application_id}", flush=True)
+            print(f"DEBUG BEC: Tentative Login Direct sur {BEC_EMAIL}...", flush=True)
+            r = await client.post(f"{base_url}/login", data=payload)
             
-            # Forçage brutal de l'identifiant Sauter
-            client.application_id = "cp7He8X6836936S6"
-            
-            print(f"DEBUG BEC: ID après forçage: {client.application_id}", flush=True)
-            print(f"DEBUG BEC: Envoi du login pour {BEC_EMAIL}...", flush=True)
+            if r.status_code != 200:
+                print(f"DEBUG BEC: Échec Login ({r.status_code}): {r.text}", flush=True)
+                return None
 
-            # Connexion
-            await client.login()
-            
-            print("DEBUG BEC: Login RÉUSSI !", flush=True)
+            print("DEBUG BEC: Login RÉUSSI (Cookie récupéré)", flush=True)
 
-            devices = await client.get_devices()
-            for d in devices:
-                print(f"DEBUG BEC - Device trouvé: {d.label} | Widget: {d.widget} | UI: {d.ui_class}", flush=True)
-                
-                if any(x in d.widget for x in ["Water", "Aqueo", "DHW"]) or "Boiler" in d.ui_class:
-                    states = {s.name: s.value for s in d.states}
-                    if action == "GET":
-                        return {
-                            "label": d.label,
-                            "energy": states.get("core:ElectricEnergyConsumptionState") or states.get("core:ConsumptionState"),
-                            "capacity": states.get("core:RemainingHotWaterCapacityState") or states.get("io:AmountOfHotWaterState"),
-                            "mode": states.get("core:OperatingModeState") or states.get("io:DHWModeState")
-                        }
-                    elif action == "ABSENCE":
-                        await client.execute_commands(d.device_url, [Command("setOperatingMode", ["away"])])
-                        return "✅ Ballon Sauter mis en mode ABSENCE"
-                    elif action == "HOME":
-                        await client.execute_commands(d.device_url, [Command("setOperatingMode", ["auto"])])
-                        return "✅ Ballon Sauter remis en mode AUTO"
+            # 2. RÉCUPÉRATION DES DEVICES
+            # Le cookie de session est automatiquement géré par le client httpx
+            r_dev = await client.get(f"{base_url}/setup/devices")
+            if r_dev.status_code == 200:
+                devices = r_dev.json()
+                for d in devices:
+                    if any(x in d.get('widget', '') for x in ["Water", "Aqueo", "DHW"]):
+                        # Extraction des états (structure plate en JSON)
+                        states = {s['name'].split(':')[-1]: s['value'] for s in d.get('states', [])}
                         
+                        if action == "GET":
+                            return {
+                                "label": d.get('label'),
+                                "energy": states.get("ElectricEnergyConsumptionState"),
+                                "capacity": states.get("RemainingHotWaterCapacityState"),
+                                "mode": states.get("OperatingModeState")
+                            }
+                        
+                        elif action in ["HOME", "ABSENCE"]:
+                            cmd_name = "setOperatingMode"
+                            cmd_param = "auto" if action == "HOME" else "away"
+                            
+                            # Envoi de la commande
+                            cmd_payload = {
+                                "label": f"Action via Telegram",
+                                "actions": [{
+                                    "deviceURL": d['deviceURL'],
+                                    "commands": [{"name": cmd_name, "parameters": [cmd_param]}]
+                                }]
+                            }
+                            await client.post(f"{base_url}/exec/apply", json=cmd_payload)
+                            return f"✅ Ballon : Mode {cmd_param} envoyé."
+                            
     except Exception as e:
-        # Ici on capture tout pour comprendre pourquoi GACOMA revient
-        print(f"--- BEC ERROR REPORT ---", flush=True)
-        print(f"Type: {type(e).__name__}", flush=True)
-        print(f"Message: {str(e)}", flush=True)
-        if hasattr(e, 'response'):
-            print(f"HTTP Status: {e.response.status_code if hasattr(e.response, 'status_code') else 'N/A'}", flush=True)
-        print(f"------------------------", flush=True)
+        print(f"DEBUG BEC ERROR: {str(e)}", flush=True)
     return None
 
 # --- MODULE SHELLY ---
