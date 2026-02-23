@@ -43,11 +43,16 @@ def init_db():
 async def manage_bec(action="GET"):
     if not BEC_EMAIL or not BEC_PASSWORD: return None
     try:
-        async with OverkizClient(BEC_EMAIL, BEC_PASSWORD, server=MY_SERVER,application_id="cp7He8X6836936S6") as client:
+        # On utilise spécifiquement le serveur SAUTER pour ce client
+        # Cela change automatiquement l'Application ID en interne
+        SAUTER_SERVER = SUPPORTED_SERVERS["sauter_cozytouch"]
+        
+        async with OverkizClient(BEC_EMAIL, BEC_PASSWORD, server=SAUTER_SERVER) as client:
             await client.login()
             devices = await client.get_devices()
             for d in devices:
-                if "Water" in d.widget or "Aqueo" in d.label:
+                # L'Aquéo Wi-Fi est souvent identifié par ces widgets
+                if any(x in d.widget for x in ["Water", "Aqueo", "DHW"]):
                     if action == "GET":
                         states = {s.name: s.value for s in d.states}
                         return {
@@ -57,12 +62,14 @@ async def manage_bec(action="GET"):
                             "mode": states.get("core:OperatingModeState")
                         }
                     elif action == "ABSENCE":
+                        # Pour l'Aquéo, la commande est souvent 'setOperatingMode'
                         await client.execute_commands(d.device_url, [Command("setOperatingMode", ["away"])])
-                        return "✅ Ballon mis en mode ABSENCE"
+                        return "✅ Ballon Sauter mis en mode ABSENCE"
                     elif action == "HOME":
                         await client.execute_commands(d.device_url, [Command("setOperatingMode", ["auto"])])
-                        return "✅ Ballon remis en mode AUTO"
-    except Exception as e: print(f"BEC ERR: {e}")
+                        return "✅ Ballon Sauter remis en mode AUTO"
+    except Exception as e: 
+        print(f"BEC ERR: {e}", flush=True) # Flush pour voir l'erreur sur Koyeb
     return None
 
 # --- MODULE SHELLY ---
