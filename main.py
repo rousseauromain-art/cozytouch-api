@@ -5,6 +5,7 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Cont
 from pyoverkiz.client import OverkizClient
 from pyoverkiz.const import SUPPORTED_SERVERS
 from pyoverkiz.models import Command
+import time
 
 VERSION = "11.2 (Shelly + BEC Aquéo Séparé)"
 
@@ -43,70 +44,79 @@ def init_db():
 async def manage_bec(action="GET"):
     if not BEC_EMAIL or not BEC_PASSWORD: return None
     
-    # Nouvel URL de login pour les comptes Wi-Fi natifs
-    base_url = "https://ha101-1.overkiz.com/externalapi/rest"
+    # L'URL correcte pour SAUTER (vue dans tes logs ha110 mais corrigée pour l'API)
+    base_url = "https://ha110-1.overkiz.com/externalapi/rest"
     
-    # Headers "officiels" pour bypasser l'erreur GACOMA
     headers = {
         "Content-Type": "application/x-www-form-urlencoded",
-        "X-Application-Id": "cp7He8X6836936S6", # On le remet ici en dur
-        "User-Agent": "Cozytouch/2.10.0 (iPhone; iOS 15.0)"
+        "X-Application-Id": "cp7He8X6836936S6",
+        "User-Agent": "Cozytouch/2.10.0"
     }
 
     try:
         async with httpx.AsyncClient(headers=headers, timeout=20.0, follow_redirects=True) as client:
-            # 1. LOGIN DIRECT (Méthode Form-Encoded recommandée par Jeedom)
-            payload = {
-                "userId": BEC_EMAIL,
-                "userPassword": BEC_PASSWORD
-            }
-            
-            print(f"DEBUG BEC: Tentative Login Direct sur {BEC_EMAIL}...", flush=True)
-            r = await client.post(f"{base_url}/login", data=payload)
+            # 1. LOGIN
+            print(f"DEBUG BEC: Login Sauter sur ha110...", flush=True)
+            r = await client.post(f"{base_url}/login", data={"userId": BEC_EMAIL, "userPassword": BEC_PASSWORD})
             
             if r.status_code != 200:
-                print(f"DEBUG BEC: Échec Login ({r.status_code}): {r.text}", flush=True)
+                print(f"DEBUG BEC: Login rejeté ({r.status_code})", flush=True)
                 return None
 
-            print("DEBUG BEC: Login RÉUSSI (Cookie récupéré)", flush=True)
-
-            # 2. RÉCUPÉRATION DES DEVICES
-            # Le cookie de session est automatiquement géré par le client httpx
+            # 2. DISCOVERY
             r_dev = await client.get(f"{base_url}/setup/devices")
-            if r_dev.status_code == 200:
-                devices = r_dev.json()
-                for d in devices:
-                    if any(x in d.get('widget', '') for x in ["Water", "Aqueo", "DHW"]):
-                        # Extraction des états (structure plate en JSON)
-                        states = {s['name'].split(':')[-1]: s['value'] for s in d.get('states', [])}
-                        
-                        if action == "GET":
-                            return {
-                                "label": d.get('label'),
-                                "energy": states.get("ElectricEnergyConsumptionState"),
-                                "capacity": states.get("RemainingHotWaterCapacityState"),
-                                "mode": states.get("OperatingModeState")
-                            }
-                        
-                        elif action in ["HOME", "ABSENCE"]:
-                            cmd_name = "setOperatingMode"
-                            cmd_param = "auto" if action == "HOME" else "away"
-                            
-                            # Envoi de la commande
-                            cmd_payload = {
-                                "label": f"Action via Telegram",
-                                "actions": [{
-                                    "deviceURL": d['deviceURL'],
-                                    "commands": [{"name": cmd_name, "parameters": [cmd_param]}]
-                                }]
-                            }
-                            await client.post(f"{base_url}/exec/apply", json=cmd_payload)
-                            return f"✅ Ballon : Mode {cmd_param} envoyé."
-                            
-    except Exception as e:
-        print(f"DEBUG BEC ERROR: {str(e)}", flush=True)
-    return None
+            target_url = None
+            for d in r_dev.json():
+                # On cherche le ballon Aquéo
+                if any(x in d.get('widget', '') for x in ["Water", "Aqueo", "DHW"]):
+                    target_url = d['deviceURL']
+                    states = {s['name'].split(':')[-1]: s['value'] for s in d.get('states', [])}
+                    print(f"DEBUG BEC: Ballon trouvé à {target_url}", flush=True)
+                    break
+            
+            if not target_url:
+                print("DEBUG BEC: Ballon non trouvé dans la liste des périphériques", flush=True)
+                return None
 
+            if action == "GET":
+                return {
+                    "label": "Sauter Aquéo",
+                    "capacity": states.get("RemainingHotWaterCapacityState", "??"),
+                    "mode": states.get("OperatingModeState", "??")
+                }
+
+            # 3. ACTION (Basée sur ton scénario Jeedom)
+            now = int(time.time())
+            
+            # Ton scénario Jeedom envoie un message : "[start,end]"
+            if action == "ABSENCE":
+                end = now + (21 * 24 * 3600) # +21 jours
+                msg = f"[{now},{end}]"
+            else: # HOME
+                end = now + 20 # +20 secondes (comme ton script Jeedom)
+                msg = f"[{now},{end}]"
+
+            # La commande pour l'Aquéo est souvent setAbsenceMode ou RefreshState
+            # On suit la logique du message direct du scénario
+            payload = {
+                "actions": [{
+                    "deviceURL": target_url,
+                    "commands": [{"name": "setAbsenceMode", "parameters": [msg]}]
+                }]
+            }
+            
+            print(f"DEBUG BEC: Envoi commande {msg}", flush=True)
+            res = await client.post(f"{base_url}/exec/apply", json=payload)
+            
+            if res.status_code == 200:
+                return f"✅ Commande {action} OK"
+            else:
+                print(f"DEBUG BEC: Erreur commande {res.status_code}: {res.text}", flush=True)
+                return "❌ Erreur serveur"
+
+    except Exception as e:
+        print(f"DEBUG BEC ERROR: {type(e).__name__} - {str(e)}", flush=True)
+    return None
 # --- MODULE SHELLY ---
 async def get_shelly_temp():
     if not SHELLY_TOKEN: return None
