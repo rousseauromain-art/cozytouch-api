@@ -43,33 +43,46 @@ def init_db():
 async def manage_bec(action="GET"):
     if not BEC_EMAIL or not BEC_PASSWORD: return None
     try:
-        # On utilise spécifiquement le serveur SAUTER pour ce client
-        # Cela change automatiquement l'Application ID en interne
-        SAUTER_SERVER = SUPPORTED_SERVERS["sauter_cozytouch"]
+        # On définit manuellement la config SAUTER pour écraser le défaut Atlantic
+        sauter_config = SUPPORTED_SERVERS["sauter_cozytouch"]
         
-        async with OverkizClient(BEC_EMAIL, BEC_PASSWORD, server=SAUTER_SERVER) as client:
+        # On force l'instance avec les paramètres explicites du serveur Sauter
+        async with OverkizClient(
+            username=BEC_EMAIL,
+            password=BEC_PASSWORD,
+            server=sauter_config  # On s'assure que c'est bien l'objet serveur complet
+        ) as client:
+            
+            # On écrase manuellement l'application_id juste avant le login
+            # C'est la seule façon de garantir qu'il n'utilise pas GACOMA (Atlantic)
+            client.application_id = "cp7He8X6836936S6" 
+            
             await client.login()
             devices = await client.get_devices()
+            
             for d in devices:
-                # L'Aquéo Wi-Fi est souvent identifié par ces widgets
-                if any(x in d.widget for x in ["Water", "Aqueo", "DHW"]):
+                # Debug pour voir ce que le serveur renvoie vraiment dans tes logs
+                print(f"DEBUG DEVICE: {d.label} | Widget: {d.widget}", flush=True)
+                
+                if any(x in d.widget for x in ["Water", "Aqueo", "DHW"]) or "Boiler" in d.ui_class:
+                    states = {s.name: s.value for s in d.states}
                     if action == "GET":
-                        states = {s.name: s.value for s in d.states}
                         return {
                             "label": d.label,
-                            "energy": states.get("core:ElectricEnergyConsumptionState"),
-                            "capacity": states.get("core:RemainingHotWaterCapacityState"),
-                            "mode": states.get("core:OperatingModeState")
+                            "energy": states.get("core:ElectricEnergyConsumptionState") or states.get("core:ConsumptionState"),
+                            "capacity": states.get("core:RemainingHotWaterCapacityState") or states.get("io:AmountOfHotWaterState"),
+                            "mode": states.get("core:OperatingModeState") or states.get("io:DHWModeState")
                         }
                     elif action == "ABSENCE":
-                        # Pour l'Aquéo, la commande est souvent 'setOperatingMode'
                         await client.execute_commands(d.device_url, [Command("setOperatingMode", ["away"])])
                         return "✅ Ballon Sauter mis en mode ABSENCE"
                     elif action == "HOME":
                         await client.execute_commands(d.device_url, [Command("setOperatingMode", ["auto"])])
                         return "✅ Ballon Sauter remis en mode AUTO"
-    except Exception as e: 
-        print(f"BEC ERR: {e}", flush=True) # Flush pour voir l'erreur sur Koyeb
+                        
+    except Exception as e:
+        # Si ça échoue encore, on veut voir l'erreur exacte SANS le fallback
+        print(f"BEC FINAL ERR: {type(e).__name__} - {str(e)}", flush=True)
     return None
 
 # --- MODULE SHELLY ---
