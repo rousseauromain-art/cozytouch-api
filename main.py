@@ -6,6 +6,7 @@ from pyoverkiz.client import OverkizClient
 from pyoverkiz.const import SUPPORTED_SERVERS
 from pyoverkiz.models import Command
 import time
+import urllib.parse
 
 VERSION = "11.2 (Shelly + BEC Aquéo Séparé)"
 
@@ -44,57 +45,68 @@ def init_db():
 async def manage_bec(action="GET"):
     if not BEC_EMAIL or not BEC_PASSWORD: return None
     
-    # On reste sur TahomaLink qui a répondu 401 (donc qui écoute !)
     base_url = "https://www.tahomalink.com/enduser-mobile-web/enduserAPI"
     
-    # On remplace l'ID Sauter par l'ID universel Somfy TaHoma
-    # C'est souvent la solution quand le 401 apparaît
+    # L'ID Somfy Universel qui a généré le 401 (donc le serveur a écouté)
     APPLICATION_ID = "0407153a-0d85-4811-9a74-9f2010893f41" 
+
+    # IMPORTANCE : On encode le mot de passe pour gérer les caractères spéciaux
+    encoded_password = urllib.parse.quote(BEC_PASSWORD)
+    payload = f"userId={urllib.parse.quote(BEC_EMAIL)}&userPassword={encoded_password}"
 
     headers = {
         "Content-Type": "application/x-www-form-urlencoded",
         "X-Application-Id": APPLICATION_ID,
-        "User-Agent": "TaHoma/3.0.0" # On simule l'app TaHoma plus robuste
+        "User-Agent": "TaHoma/3.0.0",
+        "Accept": "application/json"
     }
 
     try:
         async with httpx.AsyncClient(headers=headers, timeout=15.0, follow_redirects=True) as client:
-            print(f"DEBUG BEC: Tentative Login avec ID Universel...", flush=True)
+            print(f"DEBUG BEC: Tentative Login avec mot de passe encodé...", flush=True)
             
-            # LOGIN
-            r = await client.post(f"{base_url}/login", data={"userId": BEC_EMAIL, "userPassword": BEC_PASSWORD})
+            # On envoie le payload déjà encodé manuellement pour être sûr à 100%
+            r = await client.post(f"{base_url}/login", content=payload)
             
             if r.status_code == 200:
-                print("✅ DEBUG BEC: ACCÈS AUTORISÉ !", flush=True)
+                print("✅ DEBUG BEC: ACCÈS RÉUSSI ! L'encodage a fonctionné.", flush=True)
                 
-                # 2. DISCOVERY
+                # 2. RÉCUPÉRATION DES APPAREILS
                 r_dev = await client.get(f"{base_url}/setup/devices")
-                # ... (Logique de découverte identique à la 11.12) ...
                 target_url = None
-                devices = r_dev.json()
-                for d in devices:
+                for d in r_dev.json():
                     if any(x in d.get('widget', '') for x in ["Water", "Aqueo", "DHW"]):
                         target_url = d['deviceURL']
-                        # On récupère les états pour l'affichage
-                        st_dict = {s['name'].split(':')[-1]: s['value'] for s in d.get('states', [])}
+                        states = {s['name'].split(':')[-1]: s['value'] for s in d.get('states', [])}
                         break
                 
-                if not target_url: return "❌ Appareil non trouvé"
+                if not target_url: return "❌ Aquéo non trouvé"
 
                 if action == "GET":
-                    return {"label": "Aquéo", "capacity": st_dict.get("RemainingHotWaterCapacityState", "??")}
+                    return {
+                        "label": "Aquéo",
+                        "capacity": states.get("RemainingHotWaterCapacityState", "??"),
+                        "mode": states.get("OperatingModeState", "??")
+                    }
 
-                # 3. ACTION (Ta logique de timestamps Jeedom)
+                # 3. COMMANDE (Basée sur ton scénario Jeedom)
                 now = int(time.time())
                 end = now + (21 * 24 * 3600) if action == "ABSENCE" else now + 20
                 msg = f"[{now},{end}]"
                 
-                payload = {"actions": [{"deviceURL": target_url, "commands": [{"name": "setAbsenceMode", "parameters": [msg]}]}]}
-                res = await client.post(f"{base_url}/exec/apply", json=payload)
-                return "✅ Succès" if res.status_code == 200 else f"❌ Erreur {res.status_code}"
+                cmd_payload = {
+                    "actions": [{
+                        "deviceURL": target_url,
+                        "commands": [{"name": "setAbsenceMode", "parameters": [msg]}]
+                    }]
+                }
+                res = await client.post(f"{base_url}/exec/apply", json=cmd_payload)
+                return "✅ Commande envoyée" if res.status_code == 200 else f"❌ Erreur {res.status_code}"
             
             else:
-                print(f"❌ DEBUG BEC: Toujours 401 avec ID Universel (Code: {r.status_code})", flush=True)
+                print(f"❌ DEBUG BEC: Toujours rejeté (Code: {r.status_code})", flush=True)
+                if r.status_code == 401:
+                    print("CONSEIL: Vérifie si l'email ou le mdp n'a pas une majuscule différente de l'app mobile.", flush=True)
                 return None
                 
     except Exception as e:
