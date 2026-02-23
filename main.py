@@ -44,78 +44,44 @@ def init_db():
 async def manage_bec(action="GET"):
     if not BEC_EMAIL or not BEC_PASSWORD: return None
     
-    # L'URL unifiée par excellence pour Overkiz/Sauter
-    base_url = "https://ha101-1.overkiz.com/externalapi/rest"
+    # Tentative sur l'endpoint spécifique aux nouveaux comptes Wi-Fi Natifs
+    # C'est l'URL 'Cozytouch API v2'
+    base_url = "https://api.groupe-atlantic.com/api/v1"
     
-    # Headers extraits de la doc SomfyUnified
     headers = {
-        "User-Agent": "Cozytouch/2.10.0 (iPhone; iOS 15.0; Scale/3.00)",
-        "X-Application-Id": "cp7He8X6836936S6",
+        "User-Agent": "Cozytouch/2.10.0 (iPhone; iOS 15.0)",
         "Accept": "application/json",
-        "Content-Type": "application/json" # On passe en JSON pur
+        "Content-Type": "application/json"
     }
 
     try:
-        async with httpx.AsyncClient(headers=headers, timeout=15.0, follow_redirects=True) as client:
-            # 1. LOGIN (Tentative en JSON, souvent requis pour les comptes récents)
-            login_data = {
-                "userId": BEC_EMAIL,
-                "userPassword": BEC_PASSWORD
+        async with httpx.AsyncClient(headers=headers, timeout=15.0) as client:
+            print(f"DEBUG BEC: Tentative sur API Atlantic V2...", flush=True)
+            
+            # 1. AUTHENTICATION V2
+            auth_payload = {
+                "email": BEC_EMAIL,
+                "password": BEC_PASSWORD
             }
             
-            print(f"DEBUG BEC: Tentative Login Unified sur {BEC_EMAIL}...", flush=True)
-            r = await client.post(f"{base_url}/login", json=login_data)
+            # On teste l'endpoint /authenticate ou /login sur cette nouvelle API
+            r = await client.post(f"{base_url}/authenticate", json=auth_payload)
             
-            # Si le JSON échoue, on tente le Form-encoded (ancienne méthode)
-            if r.status_code != 200:
-                print(f"DEBUG BEC: Login JSON échoué ({r.status_code}), tentative Form...", flush=True)
-                headers["Content-Type"] = "application/x-www-form-urlencoded"
-                r = await client.post(f"{base_url}/login", data=login_data)
+            if r.status_code == 404:
+                # Si 404, on tente l'URL alternative que certains nouveaux ballons utilisent
+                print("DEBUG BEC: 404 sur V2, tentative sur cluster 'prod'...", flush=True)
+                base_url = "https://ha110-1.overkiz.com/externalapi/rest"
+                # Mais sans le /login, on teste le /setup direct pour voir si on est déjà reconnu
+                r = await client.get(f"{base_url}/setup")
 
+            print(f"DEBUG BEC: Status final reçu: {r.status_code}", flush=True)
+            
             if r.status_code == 200:
-                print("✅ DEBUG BEC: Login RÉUSSI", flush=True)
+                print("✅ DEBUG BEC: Connexion réussie sur la nouvelle API !", flush=True)
+                # ... suite de la logique ...
             else:
-                print(f"❌ DEBUG BEC: Login rejeté définitif ({r.status_code})", flush=True)
-                return None
-
-            # 2. RÉCUPÉRATION DES ÉQUIPEMENTS
-            r_dev = await client.get(f"{base_url}/setup/devices")
-            if r_dev.status_code != 200: return None
-            
-            target_url = None
-            for d in r_dev.json():
-                if any(x in d.get('widget', '') for x in ["Water", "Aqueo", "DHW"]):
-                    target_url = d['deviceURL']
-                    # Extraction des états (syntaxe robuste)
-                    states = {s['name'].split(':')[-1]: s['value'] for s in d.get('states', [])}
-                    break
-            
-            if not target_url: return "❌ Appareil non trouvé"
-
-            if action == "GET":
-                return {
-                    "label": "Ballon Aquéo",
-                    "capacity": states.get("RemainingHotWaterCapacityState", "??"),
-                    "mode": states.get("OperatingModeState", "??")
-                }
-
-            # 3. ACTION (Syntaxe exacte de ton fichier Jeedom)
-            now = int(time.time())
-            # [start, end]
-            end = now + (21 * 24 * 3600) if action == "ABSENCE" else now + 20
-            msg = f"[{now},{end}]"
-
-            payload = {
-                "actions": [{
-                    "deviceURL": target_url,
-                    "commands": [{"name": "setAbsenceMode", "parameters": [msg]}]
-                }]
-            }
-            
-            print(f"DEBUG BEC: Envoi commande {msg} vers {target_url}", flush=True)
-            res = await client.post(f"{base_url}/exec/apply", json=payload)
-            return "✅ Succès" if res.status_code == 200 else f"❌ Erreur {res.status_code}"
-
+                print(f"❌ DEBUG BEC: Toujours en échec ({r.status_code})", flush=True)
+                
     except Exception as e:
         print(f"DEBUG BEC ERROR: {str(e)}", flush=True)
     return None
