@@ -44,42 +44,47 @@ def init_db():
 async def manage_bec(action="GET"):
     if not BEC_EMAIL or not BEC_PASSWORD: return None
     
-    # L'adresse que tu as trouvée sur le forum eedomus
+    # On reste sur TahomaLink qui a répondu 401 (donc qui écoute !)
     base_url = "https://www.tahomalink.com/enduser-mobile-web/enduserAPI"
     
+    # On remplace l'ID Sauter par l'ID universel Somfy TaHoma
+    # C'est souvent la solution quand le 401 apparaît
+    APPLICATION_ID = "0407153a-0d85-4811-9a74-9f2010893f41" 
+
     headers = {
         "Content-Type": "application/x-www-form-urlencoded",
-        "X-Application-Id": "cp7He8X6836936S6", # ID Sauter
-        "User-Agent": "Cozytouch/2.10.0"
+        "X-Application-Id": APPLICATION_ID,
+        "User-Agent": "TaHoma/3.0.0" # On simule l'app TaHoma plus robuste
     }
 
     try:
         async with httpx.AsyncClient(headers=headers, timeout=15.0, follow_redirects=True) as client:
-            print(f"DEBUG BEC: Tentative Login sur TahomaLink...", flush=True)
+            print(f"DEBUG BEC: Tentative Login avec ID Universel...", flush=True)
             
-            # 1. LOGIN
-            # On utilise le format formulaire (data) qui est la norme sur TahomaLink
+            # LOGIN
             r = await client.post(f"{base_url}/login", data={"userId": BEC_EMAIL, "userPassword": BEC_PASSWORD})
             
             if r.status_code == 200:
-                print("✅ DEBUG BEC: LOGIN RÉUSSI sur TahomaLink !", flush=True)
+                print("✅ DEBUG BEC: ACCÈS AUTORISÉ !", flush=True)
                 
-                # 2. RÉCUPÉRATION DU BALLON
+                # 2. DISCOVERY
                 r_dev = await client.get(f"{base_url}/setup/devices")
-                # ... (Logique de découverte et commande identique au scénario Jeedom) ...
+                # ... (Logique de découverte identique à la 11.12) ...
                 target_url = None
-                for d in r_dev.json():
+                devices = r_dev.json()
+                for d in devices:
                     if any(x in d.get('widget', '') for x in ["Water", "Aqueo", "DHW"]):
                         target_url = d['deviceURL']
-                        states = {s['name'].split(':')[-1]: s['value'] for s in d.get('states', [])}
+                        # On récupère les états pour l'affichage
+                        st_dict = {s['name'].split(':')[-1]: s['value'] for s in d.get('states', [])}
                         break
                 
                 if not target_url: return "❌ Appareil non trouvé"
 
                 if action == "GET":
-                    return {"label": "Ballon", "capacity": states.get("RemainingHotWaterCapacityState", "??")}
+                    return {"label": "Aquéo", "capacity": st_dict.get("RemainingHotWaterCapacityState", "??")}
 
-                # 3. COMMANDE (Basée sur ton .txt Jeedom)
+                # 3. ACTION (Ta logique de timestamps Jeedom)
                 now = int(time.time())
                 end = now + (21 * 24 * 3600) if action == "ABSENCE" else now + 20
                 msg = f"[{now},{end}]"
@@ -89,8 +94,7 @@ async def manage_bec(action="GET"):
                 return "✅ Succès" if res.status_code == 200 else f"❌ Erreur {res.status_code}"
             
             else:
-                print(f"❌ DEBUG BEC: TahomaLink a rejeté la connexion (Code: {r.status_code})", flush=True)
-                # Si c'est encore un 404, on est fixé.
+                print(f"❌ DEBUG BEC: Toujours 401 avec ID Universel (Code: {r.status_code})", flush=True)
                 return None
                 
     except Exception as e:
