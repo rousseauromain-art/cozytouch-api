@@ -44,43 +44,54 @@ def init_db():
 async def manage_bec(action="GET"):
     if not BEC_EMAIL or not BEC_PASSWORD: return None
     
-    # Tentative sur l'endpoint spécifique aux nouveaux comptes Wi-Fi Natifs
-    # C'est l'URL 'Cozytouch API v2'
-    base_url = "https://api.groupe-atlantic.com/api/v1"
+    # L'adresse que tu as trouvée sur le forum eedomus
+    base_url = "https://www.tahomalink.com/enduser-mobile-web/enduserAPI"
     
     headers = {
-        "User-Agent": "Cozytouch/2.10.0 (iPhone; iOS 15.0)",
-        "Accept": "application/json",
-        "Content-Type": "application/json"
+        "Content-Type": "application/x-www-form-urlencoded",
+        "X-Application-Id": "cp7He8X6836936S6", # ID Sauter
+        "User-Agent": "Cozytouch/2.10.0"
     }
 
     try:
-        async with httpx.AsyncClient(headers=headers, timeout=15.0) as client:
-            print(f"DEBUG BEC: Tentative sur API Atlantic V2...", flush=True)
+        async with httpx.AsyncClient(headers=headers, timeout=15.0, follow_redirects=True) as client:
+            print(f"DEBUG BEC: Tentative Login sur TahomaLink...", flush=True)
             
-            # 1. AUTHENTICATION V2
-            auth_payload = {
-                "email": BEC_EMAIL,
-                "password": BEC_PASSWORD
-            }
-            
-            # On teste l'endpoint /authenticate ou /login sur cette nouvelle API
-            r = await client.post(f"{base_url}/authenticate", json=auth_payload)
-            
-            if r.status_code == 404:
-                # Si 404, on tente l'URL alternative que certains nouveaux ballons utilisent
-                print("DEBUG BEC: 404 sur V2, tentative sur cluster 'prod'...", flush=True)
-                base_url = "https://ha110-1.overkiz.com/externalapi/rest"
-                # Mais sans le /login, on teste le /setup direct pour voir si on est déjà reconnu
-                r = await client.get(f"{base_url}/setup")
-
-            print(f"DEBUG BEC: Status final reçu: {r.status_code}", flush=True)
+            # 1. LOGIN
+            # On utilise le format formulaire (data) qui est la norme sur TahomaLink
+            r = await client.post(f"{base_url}/login", data={"userId": BEC_EMAIL, "userPassword": BEC_PASSWORD})
             
             if r.status_code == 200:
-                print("✅ DEBUG BEC: Connexion réussie sur la nouvelle API !", flush=True)
-                # ... suite de la logique ...
+                print("✅ DEBUG BEC: LOGIN RÉUSSI sur TahomaLink !", flush=True)
+                
+                # 2. RÉCUPÉRATION DU BALLON
+                r_dev = await client.get(f"{base_url}/setup/devices")
+                # ... (Logique de découverte et commande identique au scénario Jeedom) ...
+                target_url = None
+                for d in r_dev.json():
+                    if any(x in d.get('widget', '') for x in ["Water", "Aqueo", "DHW"]):
+                        target_url = d['deviceURL']
+                        states = {s['name'].split(':')[-1]: s['value'] for s in d.get('states', [])}
+                        break
+                
+                if not target_url: return "❌ Appareil non trouvé"
+
+                if action == "GET":
+                    return {"label": "Ballon", "capacity": states.get("RemainingHotWaterCapacityState", "??")}
+
+                # 3. COMMANDE (Basée sur ton .txt Jeedom)
+                now = int(time.time())
+                end = now + (21 * 24 * 3600) if action == "ABSENCE" else now + 20
+                msg = f"[{now},{end}]"
+                
+                payload = {"actions": [{"deviceURL": target_url, "commands": [{"name": "setAbsenceMode", "parameters": [msg]}]}]}
+                res = await client.post(f"{base_url}/exec/apply", json=payload)
+                return "✅ Succès" if res.status_code == 200 else f"❌ Erreur {res.status_code}"
+            
             else:
-                print(f"❌ DEBUG BEC: Toujours en échec ({r.status_code})", flush=True)
+                print(f"❌ DEBUG BEC: TahomaLink a rejeté la connexion (Code: {r.status_code})", flush=True)
+                # Si c'est encore un 404, on est fixé.
+                return None
                 
     except Exception as e:
         print(f"DEBUG BEC ERROR: {str(e)}", flush=True)
