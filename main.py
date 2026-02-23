@@ -41,28 +41,40 @@ def init_db():
 
 # --- MODULE BEC AQUÉO (ISOLÉ) ---
 async def manage_bec(action="GET"):
-    if not BEC_EMAIL or not BEC_PASSWORD: return None
+    if not BEC_EMAIL or not BEC_PASSWORD: 
+        print("DEBUG BEC: Variables manquantes", flush=True)
+        return None
+
+    # On récupère l'objet serveur SAUTER
+    sauter_server = SUPPORTED_SERVERS["sauter_cozytouch"]
+    
+    print(f"DEBUG BEC: Tentative avec Serveur: {sauter_server.name} | URL: {sauter_server.endpoint}", flush=True)
+
     try:
-        # On définit manuellement la config SAUTER pour écraser le défaut Atlantic
-        sauter_config = SUPPORTED_SERVERS["sauter_cozytouch"]
-        
-        # On force l'instance avec les paramètres explicites du serveur Sauter
+        # On instancie le client
         async with OverkizClient(
             username=BEC_EMAIL,
             password=BEC_PASSWORD,
-            server=sauter_config  # On s'assure que c'est bien l'objet serveur complet
+            server=sauter_server
         ) as client:
             
-            # On écrase manuellement l'application_id juste avant le login
-            # C'est la seule façon de garantir qu'il n'utilise pas GACOMA (Atlantic)
-            client.application_id = "cp7He8X6836936S6" 
+            # --- VERBOSITÉ / DEBUG ---
+            print(f"DEBUG BEC: ID avant forçage: {client.application_id}", flush=True)
             
+            # Forçage brutal de l'identifiant Sauter
+            client.application_id = "cp7He8X6836936S6"
+            
+            print(f"DEBUG BEC: ID après forçage: {client.application_id}", flush=True)
+            print(f"DEBUG BEC: Envoi du login pour {BEC_EMAIL}...", flush=True)
+
+            # Connexion
             await client.login()
-            devices = await client.get_devices()
             
+            print("DEBUG BEC: Login RÉUSSI !", flush=True)
+
+            devices = await client.get_devices()
             for d in devices:
-                # Debug pour voir ce que le serveur renvoie vraiment dans tes logs
-                print(f"DEBUG DEVICE: {d.label} | Widget: {d.widget}", flush=True)
+                print(f"DEBUG BEC - Device trouvé: {d.label} | Widget: {d.widget} | UI: {d.ui_class}", flush=True)
                 
                 if any(x in d.widget for x in ["Water", "Aqueo", "DHW"]) or "Boiler" in d.ui_class:
                     states = {s.name: s.value for s in d.states}
@@ -81,8 +93,13 @@ async def manage_bec(action="GET"):
                         return "✅ Ballon Sauter remis en mode AUTO"
                         
     except Exception as e:
-        # Si ça échoue encore, on veut voir l'erreur exacte SANS le fallback
-        print(f"BEC FINAL ERR: {type(e).__name__} - {str(e)}", flush=True)
+        # Ici on capture tout pour comprendre pourquoi GACOMA revient
+        print(f"--- BEC ERROR REPORT ---", flush=True)
+        print(f"Type: {type(e).__name__}", flush=True)
+        print(f"Message: {str(e)}", flush=True)
+        if hasattr(e, 'response'):
+            print(f"HTTP Status: {e.response.status_code if hasattr(e.response, 'status_code') else 'N/A'}", flush=True)
+        print(f"------------------------", flush=True)
     return None
 
 # --- MODULE SHELLY ---
