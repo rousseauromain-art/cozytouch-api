@@ -44,8 +44,12 @@ def init_db():
 async def manage_bec(action="GET"):
     if not BEC_EMAIL or not BEC_PASSWORD: return None
     
-    # L'URL correcte pour SAUTER (vue dans tes logs ha110 mais corrigée pour l'API)
-    base_url = "https://ha110-1.overkiz.com/externalapi/rest"
+    # On teste d'abord Kiz-API (le plus probable pour l'Aquéo Wi-Fi)
+    # Puis ha110 en secours
+    endpoints = [
+        "https://kiz-api.overkiz.com/externalapi/rest",
+        "https://ha110-1.overkiz.com/externalapi/rest"
+    ]
     
     headers = {
         "Content-Type": "application/x-www-form-urlencoded",
@@ -55,49 +59,50 @@ async def manage_bec(action="GET"):
 
     try:
         async with httpx.AsyncClient(headers=headers, timeout=20.0, follow_redirects=True) as client:
-            # 1. LOGIN
-            print(f"DEBUG BEC: Login Sauter sur ha110...", flush=True)
-            r = await client.post(f"{base_url}/login", data={"userId": BEC_EMAIL, "userPassword": BEC_PASSWORD})
-            
-            if r.status_code != 200:
-                print(f"DEBUG BEC: Login rejeté ({r.status_code})", flush=True)
-                return None
+            logged_in = False
+            active_url = ""
 
-            # 2. DISCOVERY
-            r_dev = await client.get(f"{base_url}/setup/devices")
+            for base_url in endpoints:
+                print(f"DEBUG BEC: Tentative Login sur {base_url.split('//')[1].split('.')[0]}...", flush=True)
+                try:
+                    r = await client.post(f"{base_url}/login", data={"userId": BEC_EMAIL, "userPassword": BEC_PASSWORD})
+                    if r.status_code == 200:
+                        print(f"✅ DEBUG BEC: Login RÉUSSI sur {base_url}", flush=True)
+                        active_url = base_url
+                        logged_in = True
+                        break
+                    else:
+                        print(f"❌ DEBUG BEC: Rejet {base_url} (Status: {r.status_code})", flush=True)
+                except Exception as e:
+                    print(f"⚠️ DEBUG BEC: Erreur connexion {base_url}", flush=True)
+
+            if not logged_in:
+                return "❌ Erreur d'authentification (404/401)"
+
+            # 2. DISCOVERY & ACTION (Identique à ton scénario Jeedom)
+            r_dev = await client.get(f"{active_url}/setup/devices")
+            # ... (on garde la même logique de découverte et d'envoi de commande que la 11.8) ...
             target_url = None
             for d in r_dev.json():
-                # On cherche le ballon Aquéo
                 if any(x in d.get('widget', '') for x in ["Water", "Aqueo", "DHW"]):
                     target_url = d['deviceURL']
-                    states = {s['name'].split(':')[-1]: s['value'] for s in d.get('states', [])}
-                    print(f"DEBUG BEC: Ballon trouvé à {target_url}", flush=True)
+                    states = {s['name'].split(':'[-1]): s['value'] for s in d.get('states', [])}
                     break
             
-            if not target_url:
-                print("DEBUG BEC: Ballon non trouvé dans la liste des périphériques", flush=True)
-                return None
+            if not target_url: return "❌ Appareil non trouvé"
 
             if action == "GET":
                 return {
-                    "label": "Sauter Aquéo",
+                    "label": "Ballon Aquéo",
                     "capacity": states.get("RemainingHotWaterCapacityState", "??"),
                     "mode": states.get("OperatingModeState", "??")
                 }
 
-            # 3. ACTION (Basée sur ton scénario Jeedom)
             now = int(time.time())
-            
-            # Ton scénario Jeedom envoie un message : "[start,end]"
-            if action == "ABSENCE":
-                end = now + (21 * 24 * 3600) # +21 jours
-                msg = f"[{now},{end}]"
-            else: # HOME
-                end = now + 20 # +20 secondes (comme ton script Jeedom)
-                msg = f"[{now},{end}]"
+            # [start, end] comme dans ton .txt Jeedom
+            end = now + (21 * 24 * 3600) if action == "ABSENCE" else now + 20
+            msg = f"[{now},{end}]"
 
-            # La commande pour l'Aquéo est souvent setAbsenceMode ou RefreshState
-            # On suit la logique du message direct du scénario
             payload = {
                 "actions": [{
                     "deviceURL": target_url,
@@ -105,17 +110,11 @@ async def manage_bec(action="GET"):
                 }]
             }
             
-            print(f"DEBUG BEC: Envoi commande {msg}", flush=True)
-            res = await client.post(f"{base_url}/exec/apply", json=payload)
-            
-            if res.status_code == 200:
-                return f"✅ Commande {action} OK"
-            else:
-                print(f"DEBUG BEC: Erreur commande {res.status_code}: {res.text}", flush=True)
-                return "❌ Erreur serveur"
+            res = await client.post(f"{active_url}/exec/apply", json=payload)
+            return "✅ Succès" if res.status_code == 200 else f"❌ Erreur {res.status_code}"
 
     except Exception as e:
-        print(f"DEBUG BEC ERROR: {type(e).__name__} - {str(e)}", flush=True)
+        print(f"DEBUG BEC ERROR: {str(e)}", flush=True)
     return None
 # --- MODULE SHELLY ---
 async def get_shelly_temp():
