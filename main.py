@@ -6,7 +6,7 @@ from pyoverkiz.client import OverkizClient
 from pyoverkiz.const import SUPPORTED_SERVERS
 from pyoverkiz.models import Command
 
-VERSION = "13.8 (Fix Main & Shelly Link)"
+VERSION = "13.9 (Bureau ID Fix + Dynamic Shelly)"
 
 # --- CONFIGURATION ---
 TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -22,10 +22,11 @@ SHELLY_SERVER = os.getenv("SHELLY_SERVER", "shelly-209-eu.shelly.cloud")
 ATLANTIC_API = "https://apis.groupe-atlantic.com"
 CLIENT_BASIC = "Q3RfMUpWeVRtSUxYOEllZkE3YVVOQmpGblpVYToyRWNORHpfZHkzNDJVSnFvMlo3cFNKTnZVdjBh"
 
+# Dictionnaire corrigé : IDs inversés pour Chambre/Bureau
 CONFORT_VALS = {
     "14253355#1": {"name": "Salon", "temp": 19.5, "eco": 16.0},
     "190387#1": {"name": "Chambre", "temp": 19.0, "eco": 16.0},
-    "1640746#1": {"name": "Bureau", "temp": 17.5, "eco": 14.5},
+    "1640746#1": {"name": "Bureau", "temp": 17.5, "eco": 14.5}, # ID Physique Bureau
     "4326513#1": {"name": "Sèche-Serviette", "temp": 19.5, "eco": 16.0}
 }
 
@@ -57,7 +58,7 @@ async def get_current_data():
             full_id = f"{base_id}#1"
             if full_id in CONFORT_VALS:
                 name = CONFORT_VALS[full_id]["name"]
-                if name not in data: data[name] = {"temp": None, "target": None}
+                if name not in data: data[name] = {"temp": None, "target": None, "id": full_id}
                 states = {s.name: s.value for s in d.states}
                 t = states.get("core:TemperatureState")
                 c = states.get("io:EffectiveTemperatureSetpointState") or states.get("core:TargetTemperatureState")
@@ -122,16 +123,18 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             lines = []
             for n, v in data.items():
                 lines.append(f"📍 <b>{n}</b>: {v['temp']}°C (Cible: {v['target']}°C)")
-                # Correction Bug Logique : On lie le Shelly au Bureau
-                if n == "Bureau" and shelly_t:
+                # Affichage dynamique du Shelly sous la pièce avec eco=14.5
+                current_conf = next((c for c in CONFORT_VALS.values() if c["name"] == n), None)
+                if current_conf and current_conf.get("eco") == 14.5 and shelly_t:
                     lines.append(f"   └ 🌡️ <i>Shelly : {shelly_t}°C</i>")
             await query.edit_message_text("🌡️ <b>ÉTAT ACTUEL</b>\n\n" + "\n".join(lines), parse_mode='HTML', reply_markup=get_keyboard())
 
         elif query.data == "REPORT":
             conn = psycopg2.connect(DB_URL); cur = conn.cursor()
-            cur.execute("SELECT AVG(temp_radiateur), AVG(temp_shelly), AVG(temp_shelly - temp_radiateur), COUNT(*) FROM temp_logs WHERE room = 'Bureau' AND timestamp > NOW() - INTERVAL '7 days' AND temp_shelly IS NOT NULL;")
+            # Requête SQL mise à jour avec le bon ID Bureau (1640746)
+            cur.execute("SELECT AVG(temp_radiateur), AVG(temp_shelly), AVG(temp_shelly - temp_radiateur), COUNT(*) FROM temp_logs WHERE device_id LIKE '1640746%' AND timestamp > NOW() - INTERVAL '7 days' AND temp_shelly IS NOT NULL;")
             s = cur.fetchone(); cur.close(); conn.close()
-            msg = f"📊 <b>BILAN 7J</b>\nRad: {s[0]:.1f}°C / Shelly: {s[1]:.1f}°C\n<b>Δ: {s[2]:+.1f}°C</b>\n<i>{s[3]} mesures.</i>" if s and s[3]>0 else "⚠️ Pas de données."
+            msg = f"📊 <b>BILAN 7J (Bureau)</b>\nRad: {s[0]:.1f}°C / Shelly: {s[1]:.1f}°C\n<b>Δ: {s[2]:+.1f}°C</b>\n<i>{s[3]} mesures.</i>" if s and s[3]>0 else "⚠️ Pas de données."
             await query.message.reply_text(msg, parse_mode='HTML')
 
         elif query.data.startswith("BEC_"):
@@ -142,22 +145,19 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log_koyeb(f"Error: {e}")
         await query.edit_message_text(f"⚠️ Erreur : {str(e)}", reply_markup=get_keyboard())
 
-# --- SERVEUR & MAIN (Correction Bug Fatal Indentation) ---
+# --- SERVEUR & MAIN ---
 
 class Health(BaseHTTPRequestHandler):
     def do_GET(self): self.send_response(200); self.end_headers(); self.wfile.write(b"OK")
 
 def main():
-    # Toute la logique de démarrage DOIT être à l'intérieur de main()
     threading.Thread(target=lambda: HTTPServer(('0.0.0.0', 8000), Health).serve_forever(), daemon=True).start()
-    
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", lambda u,c: u.message.reply_text(f"🚀 v{VERSION}", reply_markup=get_keyboard())))
     app.add_handler(CallbackQueryHandler(button_handler))
-    
     log_koyeb(f"DÉMARRAGE v{VERSION}")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
-    
+    q
