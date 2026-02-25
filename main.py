@@ -109,8 +109,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             data, shelly_t = await get_current_data()
             lines = [f"📍 <b>{n}</b>: {v['temp']}°C (Cible: {v['target']}°C)" for n, v in data.items()]
             if shelly_t: lines.append(f"   └ 🌡️ <i>Shelly : {shelly_t}°C</i>")
-            await query.edit_message_text("🌡️ <b>ÉTAT ACTUEL</b>\n\n" + "\n".join(lines), parse_mode='HTML', reply_markup=get_keyboard())
-
+            await query.edit_message_text("🌡️ <b>ÉTAT ACTUEL</b>\n\n" + "\n".join(lines), parse_mode='HTML', reply_markup=get_keyboard()
             elif query.data in ["HOME", "ABSENCE"]:
             await query.edit_message_text(f"⏳ Activation {query.data}...")
             async with OverkizClient(OVERKIZ_EMAIL, OVERKIZ_PASSWORD, server=SUPPORTED_SERVERS["atlantic_cozytouch"]) as client:
