@@ -6,7 +6,7 @@ from pyoverkiz.client import OverkizClient
 from pyoverkiz.const import SUPPORTED_SERVERS
 from pyoverkiz.models import Command
 
-VERSION = "13.7 (Bureau Fix + Eco Logic)"
+VERSION = "13.8 (Fix Main & Shelly Link)"
 
 # --- CONFIGURATION ---
 TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -22,7 +22,6 @@ SHELLY_SERVER = os.getenv("SHELLY_SERVER", "shelly-209-eu.shelly.cloud")
 ATLANTIC_API = "https://apis.groupe-atlantic.com"
 CLIENT_BASIC = "Q3RfMUpWeVRtSUxYOEllZkE3YVVOQmpGblpVYToyRWNORHpfZHkzNDJVSnFvMlo3cFNKTnZVdjBh"
 
-# Configuration des pièces avec températures Confort et Eco
 CONFORT_VALS = {
     "14253355#1": {"name": "Salon", "temp": 19.5, "eco": 16.0},
     "1640746#1": {"name": "Chambre", "temp": 19.0, "eco": 16.0},
@@ -36,7 +35,7 @@ _magellan_token_expiry = 0
 def log_koyeb(msg):
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
-# --- MODULE LECTURE RADIATEURS & SHELLY ---
+# --- MODULES LECTURE ---
 
 async def get_shelly_temp():
     if not SHELLY_TOKEN: return None
@@ -66,8 +65,6 @@ async def get_current_data():
                 if c is not None: data[name]["target"] = c
         return data, shelly_t
 
-# --- MODULE BALLON (STANDBY) ---
-
 async def get_magellan_token():
     global _magellan_token, _magellan_token_expiry
     if _magellan_token and time.time() < _magellan_token_expiry - 60: return _magellan_token
@@ -75,7 +72,7 @@ async def get_magellan_token():
         try:
             r = await client.post(f"{ATLANTIC_API}/token",
                 headers={"Authorization": f"Basic {CLIENT_BASIC}", "Content-Type": "application/x-www-form-urlencoded"},
-                data={"grant_type": "password", "username": BEC_USER, "password": BEC_PASS}, timeout=12)
+                data={"grant_type": "password", "username": f"GA-PRIVATEPERSON/{BEC_USER}", "password": BEC_PASS}, timeout=12)
             if r.status_code == 200:
                 d = r.json()
                 _magellan_token, _magellan_token_expiry = d["access_token"], time.time() + d.get("expires_in", 3600)
@@ -84,11 +81,9 @@ async def get_magellan_token():
     return None
 
 async def manage_bec(action="GET"):
-    token = await get_magellan_token()
-    if not token: return "❌ Erreur Auth Magellan"
-    return "⏳ API WiFi Direct en analyse (Utilisez l'App Sauter)"
+    return "⏳ En attente des infos du sniff (HTTP Toolkit)..."
 
-# --- INTERFACE TELEGRAM ---
+# --- INTERFACE & HANDLERS ---
 
 def get_keyboard():
     return InlineKeyboardMarkup([
@@ -102,7 +97,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     
     try:
-        # --- COMMANDES CHAUFFAGE ---
         if query.data in ["HOME", "ABSENCE"]:
             await query.edit_message_text(f"⏳ Activation {query.data}...")
             async with OverkizClient(OVERKIZ_EMAIL, OVERKIZ_PASSWORD, server=SUPPORTED_SERVERS["atlantic_cozytouch"]) as client:
@@ -113,72 +107,57 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     sid = d.device_url.split('/')[-1]
                     if sid in CONFORT_VALS:
                         conf = CONFORT_VALS[sid]
-                        # Choix température selon mode
                         t_val = conf["temp"] if query.data == "HOME" else conf["eco"]
-                        
-                        # Commande selon type de radiateur
                         mode = "internal" if query.data == "HOME" else ("basic" if "Heater" in d.widget else "external")
                         cmd = "setOperatingMode" if "Heater" in d.widget else "setTowelDryerOperatingMode"
-                        
                         try:
-                            await client.execute_commands(d.device_url, [
-                                Command("setTargetTemperature", [t_val]), 
-                                Command(cmd, [mode])
-                            ])
+                            await client.execute_commands(d.device_url, [Command("setTargetTemperature", [t_val]), Command(cmd, [mode])])
                             res.append(f"✅ {conf['name']} ({t_val}°C)")
-                        except:
-                            res.append(f"❌ {conf['name']}")
-                
+                        except: res.append(f"❌ {conf['name']}")
                 await query.edit_message_text(f"<b>RÉSULTAT:</b>\n" + "\n".join(res), parse_mode='HTML', reply_markup=get_keyboard())
 
-        # --- ÉTAT ACTUEL ---
         elif query.data == "LIST":
             await query.edit_message_text("🔍 Lecture...")
             data, shelly_t = await get_current_data()
-            lines = [f"📍 <b>{n}</b>: {v['temp']}°C (Cible: {v['target']}°C)" for n, v in data.items()]
-            if shelly_t:
-                lines.append(f"   └ 🌡️ <i>Shelly : {shelly_t}°C</i>")
+            lines = []
+            for n, v in data.items():
+                lines.append(f"📍 <b>{n}</b>: {v['temp']}°C (Cible: {v['target']}°C)")
+                # Correction Bug Logique : On lie le Shelly au Bureau
+                if n == "Bureau" and shelly_t:
+                    lines.append(f"   └ 🌡️ <i>Shelly : {shelly_t}°C</i>")
             await query.edit_message_text("🌡️ <b>ÉTAT ACTUEL</b>\n\n" + "\n".join(lines), parse_mode='HTML', reply_markup=get_keyboard())
 
-        # --- STATISTIQUES 7J ---
         elif query.data == "REPORT":
-            try:
-                conn = psycopg2.connect(DB_URL)
-                cur = conn.cursor()
-                cur.execute("SELECT AVG(temp_radiateur), AVG(temp_shelly), AVG(temp_shelly - temp_radiateur), COUNT(*) FROM temp_logs WHERE room = 'Bureau' AND timestamp > NOW() - INTERVAL '7 days' AND temp_shelly IS NOT NULL;")
-                s = cur.fetchone()
-                cur.close()
-                conn.close()
-                msg = f"📊 <b>BILAN 7J</b>\nRad: {s[0]:.1f}°C / Shelly: {s[1]:.1f}°C\n<b>Δ: {s[2]:+.1f}°C</b>\n<i>{s[3]} mesures.</i>" if s and s[3]>0 else "⚠️ Pas de données."
-                await query.message.reply_text(msg, parse_mode='HTML')
-            except Exception as e:
-                log_koyeb(f"SQL Error: {e}")
-                await query.message.reply_text("⚠️ Erreur SQL")
+            conn = psycopg2.connect(DB_URL); cur = conn.cursor()
+            cur.execute("SELECT AVG(temp_radiateur), AVG(temp_shelly), AVG(temp_shelly - temp_radiateur), COUNT(*) FROM temp_logs WHERE room = 'Bureau' AND timestamp > NOW() - INTERVAL '7 days' AND temp_shelly IS NOT NULL;")
+            s = cur.fetchone(); cur.close(); conn.close()
+            msg = f"📊 <b>BILAN 7J</b>\nRad: {s[0]:.1f}°C / Shelly: {s[1]:.1f}°C\n<b>Δ: {s[2]:+.1f}°C</b>\n<i>{s[3]} mesures.</i>" if s and s[3]>0 else "⚠️ Pas de données."
+            await query.message.reply_text(msg, parse_mode='HTML')
 
-        # --- BALLON ---
         elif query.data.startswith("BEC_"):
             res = await manage_bec(query.data.replace("BEC_", ""))
             await query.edit_message_text(f"<b>BALLON:</b>\n{res}", parse_mode='HTML', reply_markup=get_keyboard())
 
     except Exception as e:
-        log_koyeb(f"Global Error: {e}")
+        log_koyeb(f"Error: {e}")
         await query.edit_message_text(f"⚠️ Erreur : {str(e)}", reply_markup=get_keyboard())
 
-# --- SERVEUR DE SANTÉ & DÉMARRAGE ---
+# --- SERVEUR & MAIN (Correction Bug Fatal Indentation) ---
 
 class Health(BaseHTTPRequestHandler):
-    def do_GET(self): 
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"OK")
+    def do_GET(self): self.send_response(200); self.end_headers(); self.wfile.write(b"OK")
 
 def main():
+    # Toute la logique de démarrage DOIT être à l'intérieur de main()
     threading.Thread(target=lambda: HTTPServer(('0.0.0.0', 8000), Health).serve_forever(), daemon=True).start()
+    
     app = Application.builder().token(TOKEN).build()
-    app.add_handler(CommandHandler("start", lambda u,c: u.message.reply_text(f"🚀 Pilotage v{VERSION}", reply_markup=get_keyboard())))
+    app.add_handler(CommandHandler("start", lambda u,c: u.message.reply_text(f"🚀 v{VERSION}", reply_markup=get_keyboard())))
     app.add_handler(CallbackQueryHandler(button_handler))
+    
     log_koyeb(f"DÉMARRAGE v{VERSION}")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
+    
