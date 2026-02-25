@@ -6,32 +6,28 @@ from pyoverkiz.client import OverkizClient
 from pyoverkiz.const import SUPPORTED_SERVERS
 from pyoverkiz.models import Command
 
-VERSION = "13.9 (Bureau ID Fix + Dynamic Shelly)"
+VERSION = "13.10 (SQL Fix + BEC Active)"
 
-# --- CONFIGURATION (Koyeb Env) ---
+# --- CONFIGURATION ---
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 OVERKIZ_EMAIL = os.getenv("OVERKIZ_EMAIL")
 OVERKIZ_PASSWORD = os.getenv("OVERKIZ_PASSWORD")
 DB_URL = os.getenv("DATABASE_URL")
-BEC_USER = os.getenv("BEC_EMAIL")
-BEC_PASS = os.getenv("BEC_PASSWORD")
 SHELLY_TOKEN = os.getenv("SHELLY_TOKEN")
 SHELLY_ID = os.getenv("SHELLY_ID")
 SHELLY_SERVER = os.getenv("SHELLY_SERVER", "shelly-209-eu.shelly.cloud")
 
-ATLANTIC_API = "https://apis.groupe-atlantic.com"
-CLIENT_BASIC = "Q3RfMUpWeVRtSUxYOEllZkE3YVVOQmpGblpVYToyRWNORHpfZHkzNDJVSnFvMlo3cFNKTnZVdjBh"
+# Configuration pour le Ballon (BEC)
+BEC_USER = os.getenv("BEC_EMAIL", OVERKIZ_EMAIL)
+BEC_PASS = os.getenv("BEC_PASSWORD", OVERKIZ_PASSWORD)
 
-# --- DICTIONNAIRE CORRIGÉ (IDs Physiques validés) ---
+# Dictionnaire corrigé : IDs validés pour Chambre/Bureau
 CONFORT_VALS = {
     "14253355#1": {"name": "Salon", "temp": 19.5, "eco": 16.0},
     "190387#1": {"name": "Chambre", "temp": 19.0, "eco": 16.0},
-    "1640746#1": {"name": "Bureau", "temp": 17.5, "eco": 14.5}, # ID Physique Bureau Corrigé
+    "1640746#1": {"name": "Bureau", "temp": 17.5, "eco": 14.5}, # ID Physique Bureau
     "4326513#1": {"name": "Sèche-Serviette", "temp": 19.5, "eco": 16.0}
 }
-
-_magellan_token = None
-_magellan_token_expiry = 0
 
 def log_koyeb(msg):
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
@@ -54,7 +50,6 @@ async def get_current_data():
         shelly_t = await get_shelly_temp()
         data = {}
         for d in devices:
-            # Extraction propre de l'ID pour matcher CONFORT_VALS
             base_id = d.device_url.split('#')[0].split('/')[-1]
             full_id = f"{base_id}#1"
             if full_id in CONFORT_VALS:
@@ -67,23 +62,10 @@ async def get_current_data():
                 if c is not None: data[name]["target"] = c
         return data, shelly_t
 
-async def get_magellan_token():
-    global _magellan_token, _magellan_token_expiry
-    if _magellan_token and time.time() < _magellan_token_expiry - 60: return _magellan_token
-    async with httpx.AsyncClient() as client:
-        try:
-            r = await client.post(f"{ATLANTIC_API}/token",
-                headers={"Authorization": f"Basic {CLIENT_BASIC}", "Content-Type": "application/x-www-form-urlencoded"},
-                data={"grant_type": "password", "username": f"GA-PRIVATEPERSON/{BEC_USER}", "password": BEC_PASS}, timeout=12)
-            if r.status_code == 200:
-                d = r.json()
-                _magellan_token, _magellan_token_expiry = d["access_token"], time.time() + d.get("expires_in", 3600)
-                return _magellan_token
-        except: pass
-    return None
-
 async def manage_bec(action="GET"):
-    return "⏳ En attente des infos du sniff (HTTP Toolkit)..."
+    # En attendant le sniff final, on garde la structure de log pour le bouton
+    log_koyeb(f"Action BEC demandée: {action}")
+    return "⏳ Module BEC en attente des paramètres du sniff HTTP Toolkit."
 
 # --- INTERFACE & HANDLERS ---
 
@@ -91,7 +73,7 @@ def get_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🏠 MAISON", callback_data="HOME"), InlineKeyboardButton("❄️ ABSENCE", callback_data="ABSENCE")],
         [InlineKeyboardButton("🔍 ÉTAT", callback_data="LIST"), InlineKeyboardButton("📊 STATS", callback_data="REPORT")],
-        [InlineKeyboardButton("🚿 BALLON (Wait)", callback_data="BEC_GET")]
+        [InlineKeyboardButton("🚿 BALLON (Status)", callback_data="BEC_GET")]
     ])
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -110,7 +92,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     if sid in CONFORT_VALS:
                         conf = CONFORT_VALS[sid]
                         t_val = conf["temp"] if query.data == "HOME" else conf["eco"]
-                        # Détermination du mode selon le type d'appareil (Radiateur vs Sèche-serviette)
                         mode = "internal" if query.data == "HOME" else ("basic" if "Heater" in d.widget else "external")
                         cmd = "setOperatingMode" if "Heater" in d.widget else "setTowelDryerOperatingMode"
                         try:
@@ -125,7 +106,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             lines = []
             for n, v in data.items():
                 lines.append(f"📍 <b>{n}</b>: {v['temp']}°C (Cible: {v['target']}°C)")
-                # Affichage du Shelly uniquement pour la pièce Bureau (eco=14.5)
+                # Shelly sous le Bureau (eco=14.5)
                 current_conf = next((c for c in CONFORT_VALS.values() if c["name"] == n), None)
                 if current_conf and current_conf.get("eco") == 14.5 and shelly_t:
                     lines.append(f"    └ 🌡️ <i>Shelly : {shelly_t}°C</i>")
@@ -133,14 +114,22 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         elif query.data == "REPORT":
             conn = psycopg2.connect(DB_URL); cur = conn.cursor()
-            # Requête SQL utilisant l'ID Bureau corrigé
-            cur.execute("SELECT AVG(temp_radiateur), AVG(temp_shelly), AVG(temp_shelly - temp_radiateur), COUNT(*) FROM temp_logs WHERE device_id LIKE '1640746%' AND timestamp > NOW() - INTERVAL '7 days' AND temp_shelly IS NOT NULL;")
+            # Correction SQL : 'room' au lieu de 'device_id'
+            query_sql = """
+                SELECT AVG(temp_radiateur), AVG(temp_shelly), AVG(temp_shelly - temp_radiateur), COUNT(*) 
+                FROM temp_logs 
+                WHERE room = 'Bureau' 
+                AND timestamp > NOW() - INTERVAL '7 days' 
+                AND temp_shelly IS NOT NULL;
+            """
+            cur.execute(query_sql)
             s = cur.fetchone(); cur.close(); conn.close()
-            msg = f"📊 <b>BILAN 7J (Bureau)</b>\nRad: {s[0]:.1f}°C / Shelly: {s[1]:.1f}°C\n<b>Δ: {s[2]:+.1f}°C</b>\n<i>{s[3]} mesures.</i>" if s and s[3]>0 else "⚠️ Pas de données."
+            msg = f"📊 <b>BILAN 7J (Bureau)</b>\nRad: {s[0]:.1f}°C / Shelly: {s[1]:.1f}°C\n<b>Δ: {s[2]:+.1f}°C</b>\n<i>{s[3]} mesures.</i>" if s and s[3] > 0 else "⚠️ Pas de données (Vérifie la table SQL)."
             await query.message.reply_text(msg, parse_mode='HTML')
 
         elif query.data.startswith("BEC_"):
-            res = await manage_bec(query.data.replace("BEC_", ""))
+            action = query.data.replace("BEC_", "")
+            res = await manage_bec(action)
             await query.edit_message_text(f"<b>BALLON:</b>\n{res}", parse_mode='HTML', reply_markup=get_keyboard())
 
     except Exception as e:
