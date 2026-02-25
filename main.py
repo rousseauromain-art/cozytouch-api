@@ -23,10 +23,10 @@ ATLANTIC_API = "https://apis.groupe-atlantic.com"
 CLIENT_BASIC = "Q3RfMUpWeVRtSUxYOEllZkE3YVVOQmpGblpVYToyRWNORHpfZHkzNDJVSnFvMlo3cFNKTnZVdjBh"
 
 CONFORT_VALS = {
-    "14253355#1": {"name": "Salon", "temp": 19.5},
-    "1640746#1": {"name": "Chambre", "temp": 19.0},
-    "190387#1": {"name": "Bureau", "temp": 19.0},
-    "4326513#1": {"name": "Sèche-Serviette", "temp": 19.5}
+    "14253355#1": {"name": "Salon", "temp": 19.5, "eco": 16.0},
+    "1640746#1": {"name": "Chambre", "temp": 19.0, "eco": 16.0},
+    "190387#1": {"name": "Bureau", "temp": 17.5, "eco": 14.5}, # <-- Modifié ici
+    "4326513#1": {"name": "Sèche-Serviette", "temp": 19.5, "eco": 16.0}
 }
 
 _magellan_token = None
@@ -111,7 +111,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if shelly_t: lines.append(f"   └ 🌡️ <i>Shelly : {shelly_t}°C</i>")
             await query.edit_message_text("🌡️ <b>ÉTAT ACTUEL</b>\n\n" + "\n".join(lines), parse_mode='HTML', reply_markup=get_keyboard())
 
-        elif query.data in ["HOME", "ABSENCE"]:
+           elif query.data in ["HOME", "ABSENCE"]:
             await query.edit_message_text(f"⏳ Activation {query.data}...")
             async with OverkizClient(OVERKIZ_EMAIL, OVERKIZ_PASSWORD, server=SUPPORTED_SERVERS["atlantic_cozytouch"]) as client:
                 await client.login()
@@ -121,14 +121,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     sid = d.device_url.split('/')[-1]
                     if sid in CONFORT_VALS:
                         conf = CONFORT_VALS[sid]
-                        t_val = conf["temp"] if query.data == "HOME" else 16.0
+                        # Logique intelligente : prend 'temp' pour HOME, sinon la valeur 'eco' spécifique
+                        t_val = conf["temp"] if query.data == "HOME" else conf["eco"]
+                        
                         mode = "internal" if query.data == "HOME" else ("basic" if "Heater" in d.widget else "external")
                         cmd = "setOperatingMode" if "Heater" in d.widget else "setTowelDryerOperatingMode"
                         try:
                             await client.execute_commands(d.device_url, [Command("setTargetTemperature", [t_val]), Command(cmd, [mode])])
-                            res.append(f"✅ {conf['name']}")
+                            res.append(f"✅ {conf['name']} ({t_val}°C)")
                         except: res.append(f"❌ {conf['name']}")
-                await query.edit_message_text(f"<b>RÉSULTAT:</b>\n" + "\n".join(res), parse_mode='HTML', reply_markup=get_keyboard())
+                await query.edit_message_text(f"<b>RÉSULTAT:</b>\n" + "\n".join(res), parse_mode='HTML', reply_markup=get_keyboard()) 
 
         elif query.data == "REPORT":
             try:
