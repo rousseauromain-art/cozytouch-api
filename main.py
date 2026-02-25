@@ -105,12 +105,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     
     try:
-        if query.data == "LIST":
-            data, shelly_t = await get_current_data()
-            lines = [f"📍 <b>{n}</b>: {v['temp']}°C (Cible: {v['target']}°C)" for n, v in data.items()]
-            if shelly_t: lines.append(f"   └ 🌡️ <i>Shelly : {shelly_t}°C</i>")
-            await query.edit_message_text("🌡️ <b>ÉTAT ACTUEL</b>\n\n" + "\n".join(lines), parse_mode='HTML', reply_markup=get_keyboard()
-            elif query.data in ["HOME", "ABSENCE"]:
+        # --- CAS 1 : MODE MAISON OU ABSENCE ---
+        if query.data in ["HOME", "ABSENCE"]:
             await query.edit_message_text(f"⏳ Activation {query.data}...")
             async with OverkizClient(OVERKIZ_EMAIL, OVERKIZ_PASSWORD, server=SUPPORTED_SERVERS["atlantic_cozytouch"]) as client:
                 await client.login()
@@ -120,33 +116,59 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     sid = d.device_url.split('/')[-1]
                     if sid in CONFORT_VALS:
                         conf = CONFORT_VALS[sid]
-                        # Logique intelligente : prend 'temp' pour HOME, sinon la valeur 'eco' spécifique
+                        # Sélection de la température (17.5 si HOME, valeur 'eco' si ABSENCE)
                         t_val = conf["temp"] if query.data == "HOME" else conf["eco"]
                         
+                        # Détermination des commandes selon le type d'appareil
                         mode = "internal" if query.data == "HOME" else ("basic" if "Heater" in d.widget else "external")
                         cmd = "setOperatingMode" if "Heater" in d.widget else "setTowelDryerOperatingMode"
+                        
                         try:
-                            await client.execute_commands(d.device_url, [Command("setTargetTemperature", [t_val]), Command(cmd, [mode])])
+                            await client.execute_commands(d.device_url, [
+                                Command("setTargetTemperature", [t_val]), 
+                                Command(cmd, [mode])
+                            ])
                             res.append(f"✅ {conf['name']} ({t_val}°C)")
-                        except: res.append(f"❌ {conf['name']}")
-                await query.edit_message_text(f"<b>RÉSULTAT:</b>\n" + "\n".join(res), parse_mode='HTML', reply_markup=get_keyboard()) 
+                        except:
+                            res.append(f"❌ {conf['name']}")
+                
+                await query.edit_message_text(f"<b>RÉSULTAT:</b>\n" + "\n".join(res), parse_mode='HTML', reply_markup=get_keyboard())
 
+        # --- CAS 2 : LISTE DES TEMPÉRATURES ---
+        elif query.data == "LIST":
+            await query.edit_message_text("🔍 Lecture...")
+            data, shelly_t = await get_current_data()
+            lines = [f"📍 <b>{n}</b>: {v['temp']}°C (Cible: {v['target']}°C)" for n, v in data.items()]
+            if shelly_t:
+                lines.append(f"   └ 🌡️ <i>Shelly : {shelly_t}°C</i>")
+            await query.edit_message_text("🌡️ <b>ÉTAT ACTUEL</b>\n\n" + "\n".join(lines), parse_mode='HTML', reply_markup=get_keyboard())
+
+        # --- CAS 3 : RAPPORT STATISTIQUES ---
         elif query.data == "REPORT":
             try:
-                conn = psycopg2.connect(DB_URL); cur = conn.cursor()
+                conn = psycopg2.connect(DB_URL)
+                cur = conn.cursor()
                 cur.execute("SELECT AVG(temp_radiateur), AVG(temp_shelly), AVG(temp_shelly - temp_radiateur), COUNT(*) FROM temp_logs WHERE room = 'Bureau' AND timestamp > NOW() - INTERVAL '7 days' AND temp_shelly IS NOT NULL;")
-                s = cur.fetchone(); cur.close(); conn.close()
+                s = cur.fetchone()
+                cur.close()
+                conn.close()
                 msg = f"📊 <b>BILAN 7J</b>\nRad: {s[0]:.1f}°C / Shelly: {s[1]:.1f}°C\n<b>Δ: {s[2]:+.1f}°C</b>\n<i>{s[3]} mesures.</i>" if s and s[3]>0 else "⚠️ Pas de données."
                 await query.message.reply_text(msg, parse_mode='HTML')
-            except: await query.message.reply_text("⚠️ Erreur SQL")
+            except Exception as e:
+                log_koyeb(f"SQL Error: {e}")
+                await query.message.reply_text("⚠️ Erreur SQL")
 
+        # --- CAS 4 : BALLON (BEC) ---
         elif query.data.startswith("BEC_"):
             res = await manage_bec(query.data.replace("BEC_", ""))
             await query.edit_message_text(f"<b>BALLON:</b>\n{res}", parse_mode='HTML', reply_markup=get_keyboard())
 
     except Exception as e:
-        log_koyeb(f"Handler Error: {e}")
-        await query.edit_message_text("⚠️ Une erreur est survenue.", reply_markup=get_keyboard())
+        log_koyeb(f"Global Handler Error: {e}")
+        await query.edit_message_text(f"⚠️ Erreur : {str(e)}", reply_markup=get_keyboard())
+
+
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- SERVEUR & MAIN ---
 class Health(BaseHTTPRequestHandler):
