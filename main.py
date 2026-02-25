@@ -6,9 +6,9 @@ from pyoverkiz.client import OverkizClient
 from pyoverkiz.const import SUPPORTED_SERVERS
 from pyoverkiz.models import Command
 
-VERSION = "13.5 (Chauffage OK - Magellan Standby)"
+VERSION = "13.7 (Bureau Fix + Eco Logic)"
 
-# --- CONFIG ---
+# --- CONFIGURATION ---
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 OVERKIZ_EMAIL = os.getenv("OVERKIZ_EMAIL")
 OVERKIZ_PASSWORD = os.getenv("OVERKIZ_PASSWORD")
@@ -22,10 +22,11 @@ SHELLY_SERVER = os.getenv("SHELLY_SERVER", "shelly-209-eu.shelly.cloud")
 ATLANTIC_API = "https://apis.groupe-atlantic.com"
 CLIENT_BASIC = "Q3RfMUpWeVRtSUxYOEllZkE3YVVOQmpGblpVYToyRWNORHpfZHkzNDJVSnFvMlo3cFNKTnZVdjBh"
 
+# Configuration des pièces avec températures Confort et Eco
 CONFORT_VALS = {
     "14253355#1": {"name": "Salon", "temp": 19.5, "eco": 16.0},
     "1640746#1": {"name": "Chambre", "temp": 19.0, "eco": 16.0},
-    "190387#1": {"name": "Bureau", "temp": 17.5, "eco": 14.5}, # <-- Modifié ici
+    "190387#1": {"name": "Bureau", "temp": 17.5, "eco": 14.5},
     "4326513#1": {"name": "Sèche-Serviette", "temp": 19.5, "eco": 16.0}
 }
 
@@ -35,7 +36,7 @@ _magellan_token_expiry = 0
 def log_koyeb(msg):
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
-# --- MODULE CHAUFFAGE (STABLE) ---
+# --- MODULE LECTURE RADIATEURS & SHELLY ---
 
 async def get_shelly_temp():
     if not SHELLY_TOKEN: return None
@@ -65,7 +66,7 @@ async def get_current_data():
                 if c is not None: data[name]["target"] = c
         return data, shelly_t
 
-# --- MODULE BALLON (RECHERCHE EN COURS) ---
+# --- MODULE BALLON (STANDBY) ---
 
 async def get_magellan_token():
     global _magellan_token, _magellan_token_expiry
@@ -78,7 +79,6 @@ async def get_magellan_token():
             if r.status_code == 200:
                 d = r.json()
                 _magellan_token, _magellan_token_expiry = d["access_token"], time.time() + d.get("expires_in", 3600)
-                log_koyeb("✅ Token Magellan récupéré.")
                 return _magellan_token
         except: pass
     return None
@@ -86,18 +86,15 @@ async def get_magellan_token():
 async def manage_bec(action="GET"):
     token = await get_magellan_token()
     if not token: return "❌ Erreur Auth Magellan"
-    
-    # On sait maintenant que le serveur Overkiz (ha110) rejette le compte WiFi.
-    # On laisse cette fonction en attente de la nouvelle URL Magellan directe.
-    return "⏳ API WiFi Direct en cours d'analyse.\nUtilisez l'App Sauter pour le moment."
+    return "⏳ API WiFi Direct en analyse (Utilisez l'App Sauter)"
 
-# --- HANDLERS ---
+# --- INTERFACE TELEGRAM ---
 
 def get_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🏠 MAISON", callback_data="HOME"), InlineKeyboardButton("❄️ ABSENCE", callback_data="ABSENCE")],
         [InlineKeyboardButton("🔍 ÉTAT", callback_data="LIST"), InlineKeyboardButton("📊 STATS", callback_data="REPORT")],
-        [InlineKeyboardButton("🚿 BALLON (Indispo)", callback_data="BEC_GET")]
+        [InlineKeyboardButton("🚿 BALLON (Wait)", callback_data="BEC_GET")]
     ])
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -105,7 +102,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     
     try:
-        # --- CAS 1 : MODE MAISON OU ABSENCE ---
+        # --- COMMANDES CHAUFFAGE ---
         if query.data in ["HOME", "ABSENCE"]:
             await query.edit_message_text(f"⏳ Activation {query.data}...")
             async with OverkizClient(OVERKIZ_EMAIL, OVERKIZ_PASSWORD, server=SUPPORTED_SERVERS["atlantic_cozytouch"]) as client:
@@ -116,10 +113,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     sid = d.device_url.split('/')[-1]
                     if sid in CONFORT_VALS:
                         conf = CONFORT_VALS[sid]
-                        # Sélection de la température (17.5 si HOME, valeur 'eco' si ABSENCE)
+                        # Choix température selon mode
                         t_val = conf["temp"] if query.data == "HOME" else conf["eco"]
                         
-                        # Détermination des commandes selon le type d'appareil
+                        # Commande selon type de radiateur
                         mode = "internal" if query.data == "HOME" else ("basic" if "Heater" in d.widget else "external")
                         cmd = "setOperatingMode" if "Heater" in d.widget else "setTowelDryerOperatingMode"
                         
@@ -134,7 +131,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
                 await query.edit_message_text(f"<b>RÉSULTAT:</b>\n" + "\n".join(res), parse_mode='HTML', reply_markup=get_keyboard())
 
-        # --- CAS 2 : LISTE DES TEMPÉRATURES ---
+        # --- ÉTAT ACTUEL ---
         elif query.data == "LIST":
             await query.edit_message_text("🔍 Lecture...")
             data, shelly_t = await get_current_data()
@@ -143,7 +140,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 lines.append(f"   └ 🌡️ <i>Shelly : {shelly_t}°C</i>")
             await query.edit_message_text("🌡️ <b>ÉTAT ACTUEL</b>\n\n" + "\n".join(lines), parse_mode='HTML', reply_markup=get_keyboard())
 
-        # --- CAS 3 : RAPPORT STATISTIQUES ---
+        # --- STATISTIQUES 7J ---
         elif query.data == "REPORT":
             try:
                 conn = psycopg2.connect(DB_URL)
@@ -158,28 +155,30 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 log_koyeb(f"SQL Error: {e}")
                 await query.message.reply_text("⚠️ Erreur SQL")
 
-        # --- CAS 4 : BALLON (BEC) ---
+        # --- BALLON ---
         elif query.data.startswith("BEC_"):
             res = await manage_bec(query.data.replace("BEC_", ""))
             await query.edit_message_text(f"<b>BALLON:</b>\n{res}", parse_mode='HTML', reply_markup=get_keyboard())
 
     except Exception as e:
-        log_koyeb(f"Global Handler Error: {e}")
+        log_koyeb(f"Global Error: {e}")
         await query.edit_message_text(f"⚠️ Erreur : {str(e)}", reply_markup=get_keyboard())
 
+# --- SERVEUR DE SANTÉ & DÉMARRAGE ---
 
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-# --- SERVEUR & MAIN ---
 class Health(BaseHTTPRequestHandler):
-    def do_GET(self): self.send_response(200); self.end_headers(); self.wfile.write(b"OK")
+    def do_GET(self): 
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
 
 def main():
     threading.Thread(target=lambda: HTTPServer(('0.0.0.0', 8000), Health).serve_forever(), daemon=True).start()
     app = Application.builder().token(TOKEN).build()
-    app.add_handler(CommandHandler("start", lambda u,c: u.message.reply_text(f"🚀 v{VERSION}", reply_markup=get_keyboard())))
+    app.add_handler(CommandHandler("start", lambda u,c: u.message.reply_text(f"🚀 Pilotage v{VERSION}", reply_markup=get_keyboard())))
     app.add_handler(CallbackQueryHandler(button_handler))
     log_koyeb(f"DÉMARRAGE v{VERSION}")
     app.run_polling(drop_pending_updates=True)
 
-if __name__ == "__main__": main()
+if __name__ == "__main__":
+    main()
