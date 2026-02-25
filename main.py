@@ -123,4 +123,44 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif query.data.startswith("BEC_"):
         await query.edit_message_text("⏳ Action Ballon...")
-        
+        res = await manage_bec(query.data.replace("BEC_", ""))
+        await query.edit_message_text(f"<b>RÉSULTAT BALLON</b>\n\n{res}", parse_mode='HTML', reply_markup=get_keyboard())
+
+    elif query.data == "REPORT":
+        conn = psycopg2.connect(DB_URL); cur = conn.cursor()
+        cur.execute("""
+            SELECT AVG(temp_radiateur), AVG(temp_shelly), AVG(temp_shelly - temp_radiateur), COUNT(*) 
+            FROM temp_logs 
+            WHERE room = 'Bureau' AND timestamp > NOW() - INTERVAL '7 days' AND temp_shelly IS NOT NULL;
+        """)
+        s = cur.fetchone(); cur.close(); conn.close()
+        if s and s[3] > 0:
+            msg = (f"📊 <b>BILAN 7J (Bureau)</b>\nMesures : {s[3]}\n"
+                   f"Rad: {s[0]:.1f}°C / Shelly: {s[1]:.1f}°C\n"
+                   f"<b>Δ moyen: {s[2]:+.1f}°C</b>")
+        else: msg = "⚠️ Pas de données."
+        await query.message.reply_text(msg, parse_mode='HTML')
+
+# --- INITIALISATION ET SERVEUR ---
+def init_db():
+    if not DB_URL: return
+    try:
+        conn = psycopg2.connect(DB_URL); cur = conn.cursor()
+        cur.execute("CREATE TABLE IF NOT EXISTS temp_logs (id SERIAL PRIMARY KEY, timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP, room TEXT, temp_radiateur FLOAT, temp_shelly FLOAT, consigne FLOAT);")
+        conn.commit(); cur.close(); conn.close()
+    except Exception as e: print(f"DB ERR: {e}")
+
+class Health(BaseHTTPRequestHandler):
+    def do_GET(self): self.send_response(200); self.end_headers(); self.wfile.write(b"OK")
+
+def main():
+    init_db()
+    threading.Thread(target=lambda: HTTPServer(('0.0.0.0', 8000), Health).serve_forever(), daemon=True).start()
+    app = Application.builder().token(TOKEN).build()
+    app.add_handler(CommandHandler("start", lambda u,c: u.message.reply_text(f"🚀 Pilotage v{VERSION}", reply_markup=get_keyboard())))
+    app.add_handler(CallbackQueryHandler(button_handler))
+    print(f"Démarrage v{VERSION}...")
+    app.run_polling()
+
+if __name__ == "__main__":
+    main()
