@@ -24,8 +24,8 @@ CLIENT_BASIC = "Q3RfMUpWeVRtSUxYOEllZkE3YVVOQmpGblpVYToyRWNORHpfZHkzNDJVSnFvMlo3
 
 CONFORT_VALS = {
     "14253355#1": {"name": "Salon", "temp": 19.5, "eco": 16.0},
-    "1640746#1": {"name": "Chambre", "temp": 19.0, "eco": 16.0},
-    "190387#1": {"name": "Bureau", "temp": 17.5, "eco": 14.5},
+    "190387#1": {"name": "Chambre", "temp": 19.0, "eco": 16.0},
+    "1640746#1": {"name": "Bureau", "temp": 17.5, "eco": 14.5},
     "4326513#1": {"name": "Sèche-Serviette", "temp": 19.5, "eco": 16.0}
 }
 
