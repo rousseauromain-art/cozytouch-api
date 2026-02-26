@@ -6,7 +6,7 @@ from pyoverkiz.client import OverkizClient
 from pyoverkiz.const import SUPPORTED_SERVERS
 from pyoverkiz.models import Command
 
-VERSION = "13.15 (BEC Auth Debugger)"
+VERSION = "13.17 (Magellan JWT Integration)"
 
 # --- CONFIGURATION ---
 TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -25,7 +25,7 @@ SHELLY_SERVER = os.getenv("SHELLY_SERVER", "shelly-209-eu.shelly.cloud")
 ATLANTIC_API = "https://apis.groupe-atlantic.com"
 CLIENT_BASIC = "Q3RfMUpWeVRtSUxYOEllZkE3YVVOQmpGblpVYToyRWNORHpfZHkzNDJVSnFvMlo3cFNKTnZVdjBh"
 
-# Dictionnaire IDs Physiques
+# Dictionnaire IDs Physiques validés
 CONFORT_VALS = {
     "14253355#1": {"name": "Salon", "temp": 19.5, "eco": 16.0},
     "190387#1": {"name": "Chambre", "temp": 19.0, "eco": 16.0},
@@ -36,8 +36,7 @@ CONFORT_VALS = {
 def log_koyeb(msg):
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
-# --- MODULES LECTURE ---
-
+# --- MODULES ANNEXES ---
 async def get_shelly_temp():
     if not SHELLY_TOKEN: return None
     try:
@@ -47,13 +46,12 @@ async def get_shelly_temp():
             return r.json()['data']['device_status']['temperature:0']['tC']
     except: return None
 
-# --- HANDLERS INTERFACE ---
-
+# --- INTERFACE ---
 def get_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🏠 MAISON", callback_data="HOME"), InlineKeyboardButton("❄️ ABSENCE", callback_data="ABSENCE")],
         [InlineKeyboardButton("🔍 ÉTAT", callback_data="LIST"), InlineKeyboardButton("📊 STATS", callback_data="REPORT")],
-        [InlineKeyboardButton("🚿 BALLON (Test Auth)", callback_data="BEC_GET")]
+        [InlineKeyboardButton("🚿 BALLON (Scan)", callback_data="BEC_GET")]
     ])
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -81,7 +79,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         except Exception as e_dev:
                             log_koyeb(f"Erreur sur {conf['name']}: {e_dev}")
                             res.append(f"❌ {conf['name']}")
-                
                 await query.edit_message_text(f"<b>RÉSULTAT {query.data}:</b>\n" + "\n".join(res), parse_mode='HTML', reply_markup=get_keyboard())
 
         # --- ÉTAT ---
@@ -115,41 +112,70 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg = f"📊 <b>BILAN 7J (Bureau)</b>\nRad: {s[0]:.1f}°C / Shelly: {s[1]:.1f}°C\n<b>Δ: {s[2]:+.1f}°C</b>" if s and s[3]>0 else "⚠️ Pas de données."
             await query.message.reply_text(msg, parse_mode='HTML')
 
-        # --- BALLON (DEBUG AUTH MAGELLAN) ---
+        # --- BALLON (INTÉGRATION CLAUDE JWT) ---
         elif query.data == "BEC_GET":
             if not BEC_USER or not BEC_PASS:
                 await query.edit_message_text("❌ BEC_EMAIL ou BEC_PASSWORD manquants.", reply_markup=get_keyboard())
                 return
-            await query.edit_message_text("🚿 Test connexion Magellan...", reply_markup=get_keyboard())
+            await query.edit_message_text("🚿 Connexion Magellan...", reply_markup=get_keyboard())
             
-            result = "❌ Échec total."
             async with httpx.AsyncClient() as client:
-                for prefix in ["", "GA-PRIVATEPERSON/", "SAUTER/"]:
-                    username = f"{prefix}{BEC_USER}"
-                    try:
-                        r = await client.post(f"{ATLANTIC_API}/token",
-                            headers={"Authorization": f"Basic {CLIENT_BASIC}",
-                                     "Content-Type": "application/x-www-form-urlencoded"},
-                            data={"grant_type": "password", "username": username, "password": BEC_PASS},
-                            timeout=10)
-                        log_koyeb(f"BEC prefix='{prefix}' → {r.status_code}: {r.text[:150]}")
-                        if r.status_code == 200:
-                            result = f"✅ Auth OK !\nPréfixe trouvé : <code>{prefix}</code>\nToken reçu."
-                            break
-                        else:
-                            result = f"❌ Préfixe '{prefix}' échoué.\nCode: {r.status_code}"
-                    except Exception as e:
-                        log_koyeb(f"BEC exception prefix='{prefix}': {e}")
-                        result = f"⚠️ Erreur connexion: {str(e)}"
-            
-            await query.edit_message_text(f"<b>BALLON DEBUG:</b>\n{result}", parse_mode='HTML', reply_markup=get_keyboard())
+                # Étape 1 : Auth Atlantic
+                r = await client.post(f"{ATLANTIC_API}/token",
+                    headers={"Authorization": f"Basic {CLIENT_BASIC}",
+                             "Content-Type": "application/x-www-form-urlencoded"},
+                    data={"grant_type": "password", "username": BEC_USER, "password": BEC_PASS},
+                    timeout=10)
+                
+                if r.status_code != 200:
+                    await query.edit_message_text(f"❌ Auth échouée: {r.status_code}", reply_markup=get_keyboard())
+                    return
+                
+                token = r.json()["access_token"]
+                log_koyeb(f"✅ Token OK")
+
+                # Étape 2 : Récupération du JWT
+                r2 = await client.get(f"{ATLANTIC_API}/magellan/accounts/jwt",
+                                      headers={"Authorization": f"Bearer {token}"})
+                log_koyeb(f"JWT: {r2.status_code}")
+
+                if r2.status_code != 200:
+                    await query.edit_message_text(f"❌ JWT échoué: {r2.status_code}", reply_markup=get_keyboard())
+                    return
+
+                jwt = r2.text.strip().strip('"')
+
+                # Étape 3 : Login Overkiz Magellan (ha110-1)
+                r3 = await client.post("https://ha110-1.overkiz.com/enduser-mobile-web/enduserAPI/login",
+                                       headers={"Content-Type": "application/x-www-form-urlencoded"},
+                                       data={"jwt": jwt})
+                
+                if not r3.json().get("success"):
+                    await query.edit_message_text("❌ Login Overkiz Magellan échoué.", reply_markup=get_keyboard())
+                    return
+
+                # Étape 4 : Scan des équipements (Setup)
+                r4 = await client.get("https://ha110-1.overkiz.com/enduser-mobile-web/enduserAPI/setup",
+                                      cookies=dict(r3.cookies))
+                
+                devices = r4.json().get("devices", [])
+                if not devices:
+                    await query.edit_message_text("❓ Aucun équipement Magellan trouvé.", reply_markup=get_keyboard())
+                    return
+
+                lines = ["<b>📋 Équipements BEC (Magellan) :</b>"]
+                for d in devices:
+                    lines.append(f"• <b>{d.get('label','?')}</b>")
+                    lines.append(f"  URL: <code>{d.get('deviceURL','?')}</code>")
+                    lines.append(f"  Widget: <code>{d.get('uiClass','?')}</code>")
+
+                await query.edit_message_text("\n".join(lines), parse_mode='HTML', reply_markup=get_keyboard())
 
     except Exception as e:
         log_koyeb(f"Erreur Globale: {e}")
         await query.edit_message_text(f"⚠️ Erreur : {str(e)}", reply_markup=get_keyboard())
 
 # --- SERVEUR & MAIN ---
-
 class Health(BaseHTTPRequestHandler):
     def do_GET(self): self.send_response(200); self.end_headers(); self.wfile.write(b"OK")
 
@@ -163,4 +189,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-   
