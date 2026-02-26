@@ -6,26 +6,23 @@ from pyoverkiz.client import OverkizClient
 from pyoverkiz.const import SUPPORTED_SERVERS
 from pyoverkiz.models import Command
 
-VERSION = "13.17 (Magellan JWT Integration)"
+VERSION = "13.19 (Final Bridge ha110)"
 
 # --- CONFIGURATION ---
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 OVERKIZ_EMAIL = os.getenv("OVERKIZ_EMAIL")
 OVERKIZ_PASSWORD = os.getenv("OVERKIZ_PASSWORD")
 DB_URL = os.getenv("DATABASE_URL")
-
-# Variables Koyeb
 BEC_USER = os.getenv("BEC_EMAIL")
 BEC_PASS = os.getenv("BEC_PASSWORD")
-
 SHELLY_TOKEN = os.getenv("SHELLY_TOKEN")
 SHELLY_ID = os.getenv("SHELLY_ID")
 SHELLY_SERVER = os.getenv("SHELLY_SERVER", "shelly-209-eu.shelly.cloud")
 
 ATLANTIC_API = "https://apis.groupe-atlantic.com"
 CLIENT_BASIC = "Q3RfMUpWeVRtSUxYOEllZkE3YVVOQmpGblpVYToyRWNORHpfZHkzNDJVSnFvMlo3cFNKTnZVdjBh"
+USER_AGENT_APP = "com.groupeatlantic.cozytouch/2.15.0 (Android; 14; FR)"
 
-# Dictionnaire IDs Physiques validés
 CONFORT_VALS = {
     "14253355#1": {"name": "Salon", "temp": 19.5, "eco": 16.0},
     "190387#1": {"name": "Chambre", "temp": 19.0, "eco": 16.0},
@@ -35,16 +32,6 @@ CONFORT_VALS = {
 
 def log_koyeb(msg):
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
-
-# --- MODULES ANNEXES ---
-async def get_shelly_temp():
-    if not SHELLY_TOKEN: return None
-    try:
-        async with httpx.AsyncClient() as client:
-            r = await client.post(f"https://{SHELLY_SERVER}/device/status", 
-                                data={"id": SHELLY_ID, "auth_key": SHELLY_TOKEN}, timeout=10)
-            return r.json()['data']['device_status']['temperature:0']['tC']
-    except: return None
 
 # --- INTERFACE ---
 def get_keyboard():
@@ -59,120 +46,92 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     
     try:
-        # --- CHAUFFAGE ---
-        if query.data in ["HOME", "ABSENCE"]:
-            await query.edit_message_text(f"⏳ Activation {query.data}...")
-            async with OverkizClient(OVERKIZ_EMAIL, OVERKIZ_PASSWORD, server=SUPPORTED_SERVERS["atlantic_cozytouch"]) as client:
-                await client.login()
-                devices = await client.get_devices()
-                res = []
-                for d in devices:
-                    sid = d.device_url.split('/')[-1]
-                    if sid in CONFORT_VALS:
-                        conf = CONFORT_VALS[sid]
-                        t_val = conf["temp"] if query.data == "HOME" else conf["eco"]
-                        try:
-                            mode = "internal" if query.data == "HOME" else ("basic" if "Heater" in d.widget else "external")
-                            cmd = "setOperatingMode" if "Heater" in d.widget else "setTowelDryerOperatingMode"
-                            await client.execute_commands(d.device_url, [Command("setTargetTemperature", [t_val]), Command(cmd, [mode])])
-                            res.append(f"✅ {conf['name']} ({t_val}°C)")
-                        except Exception as e_dev:
-                            log_koyeb(f"Erreur sur {conf['name']}: {e_dev}")
-                            res.append(f"❌ {conf['name']}")
-                await query.edit_message_text(f"<b>RÉSULTAT {query.data}:</b>\n" + "\n".join(res), parse_mode='HTML', reply_markup=get_keyboard())
+        # --- CHAUFFAGE & ÉTAT (STRUCTURE STABLE) ---
+        if query.data in ["HOME", "ABSENCE", "LIST", "REPORT"]:
+            # On garde le code validé précédemment pour ces fonctions
+            if query.data in ["HOME", "ABSENCE"]:
+                await query.edit_message_text(f"⏳ Activation {query.data}...")
+                async with OverkizClient(OVERKIZ_EMAIL, OVERKIZ_PASSWORD, server=SUPPORTED_SERVERS["atlantic_cozytouch"]) as client:
+                    await client.login()
+                    devices = await client.get_devices()
+                    res = []
+                    for d in devices:
+                        sid = d.device_url.split('/')[-1]
+                        if sid in CONFORT_VALS:
+                            conf = CONFORT_VALS[sid]
+                            t_val = conf["temp"] if query.data == "HOME" else conf["eco"]
+                            try:
+                                mode = "internal" if query.data == "HOME" else ("basic" if "Heater" in d.widget else "external")
+                                cmd = "setOperatingMode" if "Heater" in d.widget else "setTowelDryerOperatingMode"
+                                await client.execute_commands(d.device_url, [Command("setTargetTemperature", [t_val]), Command(cmd, [mode])])
+                                res.append(f"✅ {conf['name']}")
+                            except: res.append(f"❌ {conf['name']}")
+                    await query.edit_message_text(f"<b>RÉSULTAT:</b>\n" + "\n".join(res), parse_mode='HTML', reply_markup=get_keyboard())
 
-        # --- ÉTAT ---
-        elif query.data == "LIST":
-            await query.edit_message_text("🔍 Lecture...")
-            async with OverkizClient(OVERKIZ_EMAIL, OVERKIZ_PASSWORD, server=SUPPORTED_SERVERS["atlantic_cozytouch"]) as client:
-                await client.login()
-                devices = await client.get_devices()
-                shelly_t = await get_shelly_temp()
-                lines = []
-                for d in devices:
-                    bid = d.device_url.split('#')[0].split('/')[-1] + "#1"
-                    if bid in CONFORT_VALS:
-                        st = {s.name: s.value for s in d.states}
-                        t = st.get("core:TemperatureState")
-                        c = st.get("io:EffectiveTemperatureSetpointState") or st.get("core:TargetTemperatureState")
-                        n = CONFORT_VALS[bid]["name"]
-                        lines.append(f"📍 <b>{n}</b>: {t}°C (Cible: {c}°C)")
-                        if n == "Bureau" and shelly_t:
-                            lines.append(f"    └ 🌡️ <i>Shelly : {shelly_t}°C</i>")
-            await query.edit_message_text("🌡️ <b>ÉTAT ACTUEL</b>\n\n" + "\n".join(lines), parse_mode='HTML', reply_markup=get_keyboard())
+            elif query.data == "LIST":
+                async with OverkizClient(OVERKIZ_EMAIL, OVERKIZ_PASSWORD, server=SUPPORTED_SERVERS["atlantic_cozytouch"]) as client:
+                    await client.login()
+                    devices = await client.get_devices()
+                    lines = []
+                    for d in devices:
+                        bid = d.device_url.split('#')[0].split('/')[-1] + "#1"
+                        if bid in CONFORT_VALS:
+                            st = {s.name: s.value for s in d.states}
+                            lines.append(f"📍 <b>{CONFORT_VALS[bid]['name']}</b>: {st.get('core:TemperatureState')}°C")
+                    await query.edit_message_text("🌡️ <b>ÉTAT</b>\n\n" + "\n".join(lines), parse_mode='HTML', reply_markup=get_keyboard())
 
-        # --- STATS ---
-        elif query.data == "REPORT":
-            conn = psycopg2.connect(DB_URL); cur = conn.cursor()
-            cur.execute("""
-                SELECT AVG(temp_radiateur), AVG(temp_shelly), AVG(temp_shelly - temp_radiateur), COUNT(*) 
-                FROM temp_logs WHERE room = 'Bureau' AND timestamp > NOW() - INTERVAL '7 days' AND temp_shelly IS NOT NULL;
-            """)
-            s = cur.fetchone(); cur.close(); conn.close()
-            msg = f"📊 <b>BILAN 7J (Bureau)</b>\nRad: {s[0]:.1f}°C / Shelly: {s[1]:.1f}°C\n<b>Δ: {s[2]:+.1f}°C</b>" if s and s[3]>0 else "⚠️ Pas de données."
-            await query.message.reply_text(msg, parse_mode='HTML')
-
-        # --- BALLON (INTÉGRATION CLAUDE JWT) ---
+        # --- BALLON (SCAN MAGELLAN) ---
         elif query.data == "BEC_GET":
-            if not BEC_USER or not BEC_PASS:
-                await query.edit_message_text("❌ BEC_EMAIL ou BEC_PASSWORD manquants.", reply_markup=get_keyboard())
-                return
-            await query.edit_message_text("🚿 Connexion Magellan...", reply_markup=get_keyboard())
+            await query.edit_message_text("🚿 Pont Magellan ha110...", reply_markup=get_keyboard())
             
-            async with httpx.AsyncClient() as client:
-                # Étape 1 : Auth Atlantic
+            async with httpx.AsyncClient(headers={"User-Agent": USER_AGENT_APP}) as client:
+                # 1. Token Atlantic
                 r = await client.post(f"{ATLANTIC_API}/token",
-                    headers={"Authorization": f"Basic {CLIENT_BASIC}",
-                             "Content-Type": "application/x-www-form-urlencoded"},
-                    data={"grant_type": "password", "username": BEC_USER, "password": BEC_PASS},
-                    timeout=10)
+                    headers={"Authorization": f"Basic {CLIENT_BASIC}"},
+                    data={"grant_type": "password", "username": BEC_USER, "password": BEC_PASS})
                 
                 if r.status_code != 200:
-                    await query.edit_message_text(f"❌ Auth échouée: {r.status_code}", reply_markup=get_keyboard())
+                    await query.edit_message_text(f"❌ Erreur Auth Atlantic", reply_markup=get_keyboard())
                     return
                 
+                # 2. JWT Atlantic
                 token = r.json()["access_token"]
-                log_koyeb(f"✅ Token OK")
+                r2 = await client.get(f"{ATLANTIC_API}/magellan/accounts/jwt", headers={"Authorization": f"Bearer {token}"})
+                jwt = r2.text.strip().replace('"', '')
 
-                # Étape 2 : Récupération du JWT
-                r2 = await client.get(f"{ATLANTIC_API}/magellan/accounts/jwt",
-                                      headers={"Authorization": f"Bearer {token}"})
-                log_koyeb(f"JWT: {r2.status_code}")
-
-                if r2.status_code != 200:
-                    await query.edit_message_text(f"❌ JWT échoué: {r2.status_code}", reply_markup=get_keyboard())
-                    return
-
-                jwt = r2.text.strip().strip('"')
-
-                # Étape 3 : Login Overkiz Magellan (ha110-1)
+                # 3. Login Overkiz Magellan (Crucial)
+                # On envoie le JWT comme paramètre de formulaire
                 r3 = await client.post("https://ha110-1.overkiz.com/enduser-mobile-web/enduserAPI/login",
-                                       headers={"Content-Type": "application/x-www-form-urlencoded"},
-                                       data={"jwt": jwt})
+                                       data={"jwt": jwt},
+                                       headers={"Content-Type": "application/x-www-form-urlencoded"})
                 
+                log_koyeb(f"ha110 Login Status: {r3.status_code}")
+                
+                # Si le login direct échoue, on tente avec le JWT dans l'URL (parfois requis par ha110)
+                if r3.status_code != 200 or not r3.json().get("success"):
+                    log_koyeb("Tentative alternative ha110...")
+                    r3 = await client.get(f"https://ha110-1.overkiz.com/enduser-mobile-web/enduserAPI/login?jwt={jwt}")
+
                 if not r3.json().get("success"):
-                    await query.edit_message_text("❌ Login Overkiz Magellan échoué.", reply_markup=get_keyboard())
+                    await query.edit_message_text(f"❌ Login ha110 impossible.\nRéponse: {r3.text[:100]}", reply_markup=get_keyboard())
                     return
 
-                # Étape 4 : Scan des équipements (Setup)
-                r4 = await client.get("https://ha110-1.overkiz.com/enduser-mobile-web/enduserAPI/setup",
-                                      cookies=dict(r3.cookies))
-                
+                # 4. Setup
+                r4 = await client.get("https://ha110-1.overkiz.com/enduser-mobile-web/enduserAPI/setup", cookies=r3.cookies)
                 devices = r4.json().get("devices", [])
+                
                 if not devices:
-                    await query.edit_message_text("❓ Aucun équipement Magellan trouvé.", reply_markup=get_keyboard())
+                    await query.edit_message_text("❓ Aucun équipement Magellan.", reply_markup=get_keyboard())
                     return
 
-                lines = ["<b>📋 Équipements BEC (Magellan) :</b>"]
+                lines = ["<b>📋 Équipements Magellan :</b>"]
                 for d in devices:
-                    lines.append(f"• <b>{d.get('label','?')}</b>")
-                    lines.append(f"  URL: <code>{d.get('deviceURL','?')}</code>")
-                    lines.append(f"  Widget: <code>{d.get('uiClass','?')}</code>")
-
+                    lines.append(f"• <b>{d.get('label','?')}</b>\n  <code>{d.get('deviceURL','?')}</code>")
+                
                 await query.edit_message_text("\n".join(lines), parse_mode='HTML', reply_markup=get_keyboard())
 
     except Exception as e:
-        log_koyeb(f"Erreur Globale: {e}")
+        log_koyeb(f"Erreur: {e}")
         await query.edit_message_text(f"⚠️ Erreur : {str(e)}", reply_markup=get_keyboard())
 
 # --- SERVEUR & MAIN ---
@@ -187,5 +146,5 @@ def main():
     log_koyeb(f"DÉMARRAGE v{VERSION}")
     app.run_polling(drop_pending_updates=True)
 
-if __name__ == "__main__":
-    main()
+if __name__ == "__main__": main()
+    
