@@ -6,7 +6,7 @@ from pyoverkiz.client import OverkizClient
 from pyoverkiz.const import SUPPORTED_SERVERS
 from pyoverkiz.models import Command
 
-VERSION = "13.21 (No Cleanup - Full Integration)"
+VERSION = "13.23 (Dual-Client Bridge ha110)"
 
 # --- CONFIGURATION ---
 TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -110,54 +110,75 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not BEC_USER or not BEC_PASS:
                 await query.edit_message_text("❌ BEC_EMAIL ou BEC_PASSWORD manquants.", reply_markup=get_keyboard())
                 return
-            await query.edit_message_text("🚿 Connexion Magellan (ha110)...", reply_markup=get_keyboard())
+            await query.edit_message_text("🚿 Connexion Magellan (Dual-Client)...", reply_markup=get_keyboard())
             
-            # Utilisation de follow_redirects=False pour gérer manuellement le POST (Fix Claude)
-            async with httpx.AsyncClient(headers={"User-Agent": USER_AGENT_APP}, follow_redirects=False) as client:
-                r = await client.post(f"{ATLANTIC_API}/token",
-                    headers={"Authorization": f"Basic {CLIENT_BASIC}", "Content-Type": "application/x-www-form-urlencoded"},
-                    data={"grant_type": "password", "username": BEC_USER, "password": BEC_PASS}, timeout=10)
-                
-                if r.status_code != 200:
-                    await query.edit_message_text(f"❌ Auth échouée: {r.status_code}", reply_markup=get_keyboard())
-                    return
-                
-                token = r.json()["access_token"]
-                r2 = await client.get(f"{ATLANTIC_API}/magellan/accounts/jwt", headers={"Authorization": f"Bearer {token}"})
-                jwt = r2.text.strip().strip('"')
+            # Client GET (suit les redirects pour le JWT)
+            async with httpx.AsyncClient(headers={"User-Agent": USER_AGENT_APP}, follow_redirects=True) as get_client:
+                # Client POST (bloque les redirects pour garder le POST)
+                async with httpx.AsyncClient(headers={"User-Agent": USER_AGENT_APP}, follow_redirects=False) as post_client:
+                    
+                    # 1. Auth Atlantic (POST)
+                    r = await post_client.post(f"{ATLANTIC_API}/token",
+                        headers={"Authorization": f"Basic {CLIENT_BASIC}", "Content-Type": "application/x-www-form-urlencoded"},
+                        data={"grant_type": "password", "username": BEC_USER, "password": BEC_PASS}, timeout=10)
+                    
+                    if r.status_code != 200:
+                        await query.edit_message_text(f"❌ Auth Atlantic: {r.status_code}", reply_markup=get_keyboard())
+                        return
+                    
+                    token = r.json()["access_token"]
 
-                # Login ha110 avec redirection manuelle pour garder le POST (Fix Claude)
-                login_url = "https://ha110-1.overkiz.com/enduser-mobile-web/enduserAPI/login"
-                r3 = await client.post(login_url, headers={"Content-Type": "application/x-www-form-urlencoded"}, data={"jwt": jwt})
-                
-                if r3.status_code in [301, 302, 307, 308]:
-                    redirect_url = r3.headers.get("location")
-                    log_koyeb(f"Redirect vers: {redirect_url}")
-                    r3 = await client.post(redirect_url, headers={"Content-Type": "application/x-www-form-urlencoded"}, data={"jwt": jwt})
+                    # 2. JWT (GET - doit suivre les redirects !)
+                    r2 = await get_client.get(f"{ATLANTIC_API}/magellan/accounts/jwt",
+                                               headers={"Authorization": f"Bearer {token}"})
+                    log_koyeb(f"JWT status: {r2.status_code} - Body: {r2.text[:50]}")
+                    
+                    if r2.status_code != 200:
+                        await query.edit_message_text(f"❌ JWT échoué: {r2.status_code}", reply_markup=get_keyboard())
+                        return
 
-                if not r3.json().get("success"):
-                    await query.edit_message_text(f"❌ Login Overkiz échoué\n<code>{r3.text[:150]}</code>", parse_mode='HTML', reply_markup=get_keyboard())
-                    return
+                    jwt = r2.text.strip().strip('"')
 
-                r4 = await client.get("https://ha110-1.overkiz.com/enduser-mobile-web/enduserAPI/setup", cookies=dict(r3.cookies))
-                devices = r4.json().get("devices", [])
-                if not devices:
-                    await query.edit_message_text("❓ Aucun device trouvé", reply_markup=get_keyboard())
-                    return
+                    # 3. Login Overkiz (POST - sans redirect auto)
+                    login_url = "https://ha110-1.overkiz.com/enduser-mobile-web/enduserAPI/login"
+                    r3 = await post_client.post(login_url,
+                        headers={"Content-Type": "application/x-www-form-urlencoded"},
+                        data={"jwt": jwt})
+                    
+                    log_koyeb(f"Login Initial: {r3.status_code}")
 
-                lines = ["<b>📋 Équipements BEC :</b>"]
-                for d in devices:
-                    lines.append(f"• <b>{d.get('label','?')}</b>")
-                    lines.append(f"  URL: <code>{d.get('deviceURL','?')}</code>")
-                    lines.append(f"  Widget: <code>{d.get('uiClass','?')}</code>")
+                    # Redirection manuelle pour garder le POST
+                    if r3.status_code in [301, 302, 307, 308]:
+                        redirect_url = r3.headers.get("location")
+                        log_koyeb(f"🔄 Redirect POST vers: {redirect_url}")
+                        r3 = await post_client.post(redirect_url,
+                            headers={"Content-Type": "application/x-www-form-urlencoded"},
+                            data={"jwt": jwt})
 
-                await query.edit_message_text("\n".join(lines), parse_mode='HTML', reply_markup=get_keyboard())
+                    if not r3.json().get("success"):
+                        await query.edit_message_text(f"❌ Login ha110 échoué\n<code>{r3.text[:100]}</code>", parse_mode='HTML', reply_markup=get_keyboard())
+                        return
+
+                    # 4. Setup (GET)
+                    r4 = await get_client.get("https://ha110-1.overkiz.com/enduser-mobile-web/enduserAPI/setup", cookies=r3.cookies)
+                    devices = r4.json().get("devices", [])
+                    
+                    if not devices:
+                        await query.edit_message_text("❓ Aucun équipement Magellan.", reply_markup=get_keyboard())
+                        return
+
+                    lines = ["<b>📋 Équipements BEC :</b>"]
+                    for d in devices:
+                        lines.append(f"• <b>{d.get('label','?')}</b>")
+                        lines.append(f"  URL: <code>{d.get('deviceURL','?')}</code>")
+
+                    await query.edit_message_text("\n".join(lines), parse_mode='HTML', reply_markup=get_keyboard())
 
     except Exception as e:
         log_koyeb(f"Erreur Globale: {e}")
         await query.edit_message_text(f"⚠️ Erreur : {str(e)}", reply_markup=get_keyboard())
 
-# --- PROGRAMME ---
+# --- SERVEUR ---
 class Health(BaseHTTPRequestHandler):
     def do_GET(self): self.send_response(200); self.end_headers(); self.wfile.write(b"OK")
 
@@ -171,4 +192,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
+                    
