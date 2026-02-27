@@ -7,7 +7,7 @@ from pyoverkiz.client import OverkizClient
 from pyoverkiz.const import SUPPORTED_SERVERS
 from pyoverkiz.models import Command
 
-VERSION = "15.1 (Conso HC vs HP par transitions)"
+VERSION = "15.3 (BEC Full Debug Planning)"
 
 # =============================================================================
 # CONFIGURATION
@@ -250,8 +250,67 @@ async def perform_record():
     except Exception as e:
         log(f"RECORD ERR: {e}")
 
-# =============================================================================
-# MODULE BEC (Magellan — endpoints hub.py gduteil)
+def find_water_heater(devices: list) -> dict | None:
+    """
+    Trouve le chauffe-eau dans la liste des devices.
+    Cherche d'abord par mots-clés, sinon prend le premier device.
+    Compatible avec les noms : 'Chauffe-eau', 'Aqueo', 'Sauter Phazy', etc.
+    """
+    keywords = ["chauffe", "aqueo", "water", "ballon", "phazy", "sauter",
+                "calypso", "aeromax", "explorer"]
+    for d in devices:
+        name = str(d.get("name", "")).lower()
+        if any(k in name for k in keywords):
+            return d
+    # Fallback : premier device si un seul
+    if len(devices) == 1:
+        return devices[0]
+    return None
+
+
+def decode_planning(cap150_raw) -> list[str]:
+    """
+    Décode cap150 : liste de slots [debut_min, fin_min, flag, mode]
+    Basé sur les screenshots : plages visibles ~01h56→06h30 et ~14h26→17h00
+    Format confirmé : valeurs en minutes depuis minuit.
+    255 = pas de plage active sur ce slot.
+    """
+    import json as _j
+    jours = ["Lun", "Mar", "Mer", "Jeu", "Ven", "Sam", "Dim", "J8", "J9", "J10"]
+    mode_map = {0: "Manuel", 3: "Eco+", 4: "Prog/Chauffe"}
+    lines = []
+
+    try:
+        if isinstance(cap150_raw, str):
+            cap150_raw = _j.loads(cap150_raw)
+    except:
+        return [f"  Erreur décodage: {cap150_raw}"]
+
+    for i, slot in enumerate(cap150_raw):
+        try:
+            deb_m = int(slot[0])
+            fin_m = int(slot[1])
+            flag  = slot[2]
+            mode  = int(slot[3])
+
+            if deb_m == 0 and fin_m == 255:
+                # Pas de plage horaire définie → toute la journée autorisée
+                mode_s = mode_map.get(mode, f"mode{mode}")
+                lines.append(f"  {jours[i]}: toute la journée [{mode_s}]")
+            elif deb_m == 255 and fin_m == 255:
+                lines.append(f"  {jours[i]}: inactif")
+            else:
+                deb_h = f"{deb_m//60:02d}h{deb_m%60:02d}"
+                fin_h = f"{fin_m//60:02d}h{fin_m%60:02d}"
+                mode_s = mode_map.get(mode, f"mode{mode}")
+                lines.append(f"  {jours[i]}: {deb_h} → {fin_h} [{mode_s}]")
+        except Exception as e:
+            lines.append(f"  Slot{i}: {slot} (err: {e})")
+
+    return lines if lines else ["  (vide)"]
+
+
+
 # =============================================================================
 async def bec_authenticate():
     async with httpx.AsyncClient() as client:
@@ -280,8 +339,7 @@ async def bec_get_index() -> float | None:
         if r.status_code != 200:
             return None
         setup = r.json()[0]
-        aqueo = next((d for d in setup.get("devices", [])
-                      if "aqueo" in str(d.get("name", "")).lower()), None)
+        aqueo = find_water_heater(setup.get("devices", []))
         if not aqueo:
             return None
         dev_id = aqueo.get("deviceId")
@@ -290,8 +348,8 @@ async def bec_get_index() -> float | None:
             return None
         caps = {c["capabilityId"]: c["value"] for c in r2.json()}
         log(f"BEC caps: {caps}")
-        # ID 168 = index énergie en Wh (à confirmer au premier appel via logs)
-        index_wh = float(caps.get(168, caps.get(176, 0)))
+        # capId=59 = index total énergie en Wh (validé : 566581 Wh = 566.6 kWh)
+        index_wh = float(caps.get(59, 0))
         return index_wh / 1000
 
 async def manage_bec(action="GET"):
@@ -312,47 +370,96 @@ async def manage_bec(action="GET"):
             setup = r.json()[0]
             setup_id = setup.get("id")
 
-            aqueo = next((d for d in setup.get("devices", [])
-                          if "aqueo" in str(d.get("name", "")).lower()), None)
+            aqueo = find_water_heater(setup.get("devices", []))
             if not aqueo:
                 noms = [d.get("name") for d in setup.get("devices", [])]
                 log(f"BEC devices: {noms}")
-                return f"❓ Aquéo non trouvé. Devices: {noms}"
+                return f"❓ Chauffe-eau non trouvé. Devices: {noms}"
 
             dev_id = aqueo.get("deviceId")
 
-            # --- GET ---
+            # --- GET (debug planning complet) ---
             if action == "GET":
                 r2 = await client.get(
                     f"{ATLANTIC_API}/magellan/capabilities/?deviceId={dev_id}",
                     headers=headers
                 )
                 caps = {c["capabilityId"]: c["value"] for c in r2.json()}
-                log(f"BEC caps IDs disponibles: {list(caps.keys())}")
+                log(f"BEC caps full: {caps}")
 
-                index_wh    = float(caps.get(168, caps.get(176, 0)))
-                puissance_w = int(float(caps.get(164, caps.get(160, 0))))
-                temp_cible  = float(caps.get(22, caps.get(2, 0)))
+                import json as _json
+
+                # Valeurs principales
+                index_wh    = float(caps.get(59, 0))
+                puissance_w = int(float(caps.get(164, 0)))
+                temp_cible  = float(caps.get(22, 0))
                 index_kwh   = index_wh / 1000
+                hc          = is_heure_creuse()
+                hc_label    = get_hc_label()
 
-                chauffe = f"🔥 CHAUFFE ({puissance_w}W)" if puissance_w > 0 else "💤 En veille"
-                hc_label = get_hc_label()
+                # Mode chauffe (87) : 0=manuel, 3=eco+, 4=prog HC/HP
+                mode_map   = {0: "Manuel", 3: "Eco+", 4: "Prog HC/HP"}
+                mode_val   = int(float(caps.get(87, 0)))
+                mode_label = mode_map.get(mode_val, f"Inconnu({mode_val})")
 
-                absence = setup.get("absence", {})
-                if absence and absence.get("startDate"):
-                    end_dt = datetime.fromtimestamp(absence["endDate"]).strftime("%d/%m à %Hh%M")
-                    absence_label = f"✈️ Absence jusqu'au {end_dt}"
+                # Résistance (99), Boost (165)
+                resistance = "🔴 OFF" if str(caps.get(99, "0")) == "0" else "🟢 ON"
+                boost      = "🟢 ON" if str(caps.get(165, "0")) not in ("0", "false") else "OFF"
+
+                # Mode absence (227) : 0=normal, 1=activé, 2=en attente
+                abs_map   = {0: "🏡 Normal", 1: "✈️ Activé", 2: "⏳ En attente"}
+                abs_val   = int(float(caps.get(227, 0)))
+                abs_label = abs_map.get(abs_val, f"Inconnu({abs_val})")
+
+                # Timestamps absence (222/226) : [timestamp_debut, timestamp_fin]
+                try:
+                    abs_ts  = caps.get(222, caps.get(226, "[0,0]"))
+                    ts_list = _json.loads(str(abs_ts)) if isinstance(abs_ts, str) else abs_ts
+                    if ts_list and int(ts_list[0]) > 0:
+                        deb = datetime.fromtimestamp(int(ts_list[0])).strftime("%d/%m %Hh%M")
+                        fin = datetime.fromtimestamp(int(ts_list[1])).strftime("%d/%m %Hh%M")
+                        abs_dates = f"{deb} → {fin}"
+                    else:
+                        abs_dates = "aucune période"
+                except:
+                    abs_dates = str(caps.get(222, "?"))
+
+                # Chauffe en cours
+                if puissance_w > 0:
+                    chauffe = f"🔥 CHAUFFE ({puissance_w}W) — {'✅ HC' if hc else '⚠️ HP'}"
                 else:
-                    absence_label = "🏡 Mode normal"
+                    chauffe = "💤 En veille"
 
-                return "\n".join([
-                    f"💧 <b>{aqueo.get('name', 'Aqueo')}</b>",
-                    f"🌡️ Consigne : <b>{temp_cible:.0f}°C</b>",
-                    f"⚡ {chauffe}",
-                    f"📊 Index : <b>{index_kwh:.3f} kWh</b>",
-                    f"🕐 {hc_label}",
-                    absence_label,
-                ])
+                # Planning cap150
+                planning_lines = decode_planning(caps.get(150, []))
+
+                lines = [
+                    f"💧 <b>{aqueo.get('name', 'Aqueo')}</b> (id={dev_id})",
+                    "",
+                    "⚡ <b>ÉTAT</b>",
+                    f"  {chauffe}",
+                    f"  Consigne : <b>{temp_cible:.0f}°C</b>  Mode : <b>{mode_label}</b>",
+                    f"  Résistance : {resistance}  Boost : {boost}",
+                    f"  {hc_label}",
+                    "",
+                    "📊 <b>CONSO</b>",
+                    f"  Index total (cap59) : <b>{index_kwh:.3f} kWh</b>",
+                    f"  Index partiel (cap168) : {float(caps.get(168,0))/1000:.3f} kWh",
+                    "",
+                    "✈️ <b>ABSENCE</b>",
+                    f"  État : {abs_label}",
+                    f"  Période : {abs_dates}",
+                    "",
+                    "📅 <b>PLANNING cap150</b>",
+                ] + planning_lines + [
+                    "",
+                    "🔧 <b>CAPS NON DOCUMENTÉS</b>",
+                    f"  cap188={caps.get(188,'?')}  cap218={caps.get(218,'?')}",
+                    f"  cap223={caps.get(223,'?')}  cap224={caps.get(224,'?')}",
+                    f"  cap225={caps.get(225,'?')}  cap228={caps.get(228,'?')}",
+                    f"  cap230={caps.get(230,'?')}",
+                ]
+                return "\n".join(lines)
 
             # --- STATS CONSO HC/HP ---
             if action == "STATS":
@@ -375,6 +482,7 @@ async def manage_bec(action="GET"):
                     f"<i>Basé sur {nb} périodes mesurées</i>",
                 ])
 
+            # --- ABSENCE ---
             # --- ABSENCE ---
             if action == "ABSENCE":
                 now_ts = int(datetime.now().timestamp())
@@ -541,3 +649,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
