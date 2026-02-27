@@ -4,7 +4,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
-from config import TOKEN, DB_URL, VERSION, log
+from config import TOKEN, DB_URL,BEC_PASS,BEC_USER, VERSION, log
 from bec import (manage_bec, bec_get_index, is_heure_creuse,
                  get_hc_label, minutes_until_next_transition, save_transition)
 from heating import (get_current_data, apply_heating_mode, perform_record,
@@ -83,7 +83,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif query.data.startswith("BEC_"):
             action = query.data[4:]
             await query.edit_message_text(f"⏳ Ballon {action}...")
-            res = await manage_bec(action)
+            res = await manage_bec(action,BEC_USER,BEC_PASS,DB_URL)
             await query.edit_message_text(
                 f"<b>BALLON</b>\n\n{res[:4000]}",
                 parse_mode="HTML", reply_markup=get_keyboard()
