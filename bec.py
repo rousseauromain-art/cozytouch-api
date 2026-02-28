@@ -1,5 +1,5 @@
 """Module BEC — Ballon eau chaude Atlantic/Sauter via API Magellan."""
-import json, httpx, psycopg2
+import asyncio, json, httpx, psycopg2
 from datetime import datetime
 from config import ATLANTIC_API, CLIENT_BASIC, BEC_USER, BEC_PASS, DB_URL, HC_TRANSITIONS, log
 
@@ -119,8 +119,31 @@ def decode_planning(raw) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# AUTH
+# WRITE CAPABILITY
+# cap224 = volume cible en litres (125L = 62.5% sur 200L)
+# cap22  = consigne température °C
 # ---------------------------------------------------------------------------
+async def write_capability(c: httpx.AsyncClient, h: dict, dev_id: int,
+                           cap_id: int, value: str) -> bool:
+    """Écrit une valeur sur un capability et attend la complétion."""
+    r = await c.post(f"{ATLANTIC_API}/magellan/executions/writecapability",
+                     json={"capabilityId": cap_id, "deviceId": dev_id, "value": value},
+                     headers=h, timeout=15)
+    if r.status_code != 201:
+        log(f"writecap {cap_id}={value} → {r.status_code}")
+        return False
+    exec_id = r.json()
+    for _ in range(8):
+        await asyncio.sleep(1)
+        r2 = await c.get(f"{ATLANTIC_API}/magellan/executions/{exec_id}", headers=h, timeout=10)
+        state = r2.json().get("state", 0) if r2.status_code == 200 else 0
+        if state == 3:
+            return True
+        if state not in (1, 2):
+            break
+    return False
+
+
 async def bec_authenticate():
     async with httpx.AsyncClient() as c:
         r = await c.post(f"{ATLANTIC_API}/users/token",
@@ -134,7 +157,19 @@ async def bec_authenticate():
         log(f"BEC Auth {r.status_code}: {r.text[:100]}")
         return None
 
-async def bec_get_index() -> tuple[float | None, float | None]:
+async def write_bec_capability(c: httpx.AsyncClient, token: str, dev_id: int,
+                               cap_id: int, value: str) -> bool:
+    """Écrit une valeur sur un capabilityId via /magellan/executions/writecapability."""
+    r = await c.post(
+        f"{ATLANTIC_API}/magellan/executions/writecapability",
+        json={"capabilityId": cap_id, "deviceId": dev_id, "value": value},
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        timeout=12,
+    )
+    log(f"writecapability cap{cap_id}={value} → {r.status_code}")
+    return r.status_code in (200, 201, 204)
+
+
     """Retourne (index_kwh, temp_eau_haut) pour les transitions."""
     token = await bec_authenticate()
     if not token:
@@ -230,6 +265,37 @@ async def manage_bec(action="GET"):
                 except:
                     dates = "?"
 
+                # Consignes quantité eau (cap105906=mode normal, cap105907=mode réduit ?)
+                c105906 = caps.get(105906)
+                c105907 = caps.get(105907)
+                def fmt_pct(v):
+                    if v is None: return "—"
+                    try:
+                        t = float(v)
+                        pct = round((t - 15) / (65 - 15) * 100)
+                        return f"{t:.0f}°C (~{pct}%)"
+                    except: return str(v)
+
+                # Toutes les caps triées par ID pour faire le lien avec l'app
+                all_caps_lines = ["", "📋 <b>TOUTES LES CAPABILITIES</b>"]
+                skip = {150}  # cap150 déjà décodé en planning
+                for cid in sorted(caps.keys()):
+                    if cid in skip:
+                        continue
+                    val = caps[cid]
+                    # Formater selon le type de valeur
+                    if isinstance(val, list):
+                        val_str = str(val)
+                    elif isinstance(val, (int, float)):
+                        val_str = str(val)
+                    else:
+                        try:
+                            f_val = float(val)
+                            val_str = f"{f_val:.3f}".rstrip('0').rstrip('.')
+                        except:
+                            val_str = str(val)
+                    all_caps_lines.append(f"  cap{cid} = <b>{val_str}</b>")
+
                 return "\n".join([
                     f"💧 <b>{dev.get('name','Chauffe-eau')}</b> (id={dev_id})",
                     "", "⚡ <b>ÉTAT</b>",
@@ -237,20 +303,11 @@ async def manage_bec(action="GET"):
                     f"  Consigne : <b>{temp_c:.0f}°C</b>  Mode : <b>{mode}</b>",
                     f"  Résistance : {resist}  |  Boost : {boost}",
                     f"  {get_hc_label()}",
-                    "", "🌡️ <b>TEMPÉRATURES EAU</b>",
-                    f"  Haut   (cap266) : <b>{fmt_t(t_haut)}</b>",
-                    f"  Milieu (cap265) : <b>{fmt_t(t_milieu)}</b>",
-                    f"  Bas    (cap267) : <b>{fmt_t(t_bas)}</b>",
-                    "", "💦 <b>DISPONIBILITÉ</b>",
-                    f"  Eau dispo à 40°C : <b>{fmt_v(v40_dispo)}</b> / {fmt_v(v40_total)}",
-                    f"  Taux dispo       : <b>{fmt_p(pct_dispo)}</b>",
-                    f"  Capacité cuve    : {fmt_v(cap_tank)}",
                     "", "📊 <b>CONSO</b>",
-                    f"  Index total  (cap59)  : <b>{idx:.3f} kWh</b>",
-                    f"  Index partiel(cap168) : {float(caps.get(168,0))/1000:.3f} kWh",
+                    f"  Index total (cap59) : <b>{idx:.3f} kWh</b>",
                     "", "✈️ <b>ABSENCE</b>",
                     f"  {absent}  |  Période : {dates}",
-                ] + (["", "📅 <b>PLANNING cap150</b>"] + decode_planning(caps.get(150, []))))
+                ] + all_caps_lines)
 
             if action == "STATS":
                 s = get_conso_stats(7)
@@ -277,15 +334,33 @@ async def manage_bec(action="GET"):
             if action == "ABSENCE":
                 now = int(datetime.now().timestamp())
                 payload["absence"] = {"startDate": now, "endDate": now + 30*24*3600}
+                # cap224 = quantité cible en litres (confirmé : 125L ≈ 62% dans l'app)
+                # 60% de 200L = 120L
+                vol_cible = "120"
+                label = ("✅ Mode absence activé (30j)\n"
+                         "💧 Quantité cible → <b>60% (120L)</b>\n"
+                         "🌡️ Consigne température : inchangée (65°C)")
             elif action == "HOME":
                 payload["absence"] = {}
+                # 100% de 200L = 200L
+                vol_cible = "200"
+                label = ("✅ Ballon mode normal\n"
+                         "💧 Quantité cible → <b>100% (200L)</b>\n"
+                         "🌡️ Consigne température : inchangée (65°C)")
             else:
                 return "❓ Action inconnue"
 
+            # 1. Mettre à jour le setup (activation/désactivation absence)
             r = await c.put(f"{ATLANTIC_API}/magellan/v2/setups/{setup_id}", json=payload, headers=h)
-            log(f"BEC {action}: {r.status_code}")
-            labels = {"ABSENCE": "✅ Mode absence activé (30j)", "HOME": "✅ Ballon mode normal"}
-            return labels[action] if r.status_code in (200, 204) else f"❌ {r.status_code}"
+            log(f"BEC {action} setup: {r.status_code}")
+            if r.status_code not in (200, 204):
+                return f"❌ Erreur setup {r.status_code}"
+
+            # 2. Quantité cible (cap224 = litres, confirmé par l'app : 125L ≈ 60%)
+            ok224 = await write_capability(c, h, dev_id, 224, vol_cible)
+            log(f"BEC write cap224={vol_cible}L → {'OK' if ok224 else 'ERR'}")
+
+            return label
 
         except Exception as e:
             log(f"BEC ERR: {e}"); return f"⚠️ {e}"
