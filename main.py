@@ -103,10 +103,10 @@ async def background_transition_logger():
         wait = minutes_until_next_transition()
         log(f"Prochain relevé BEC dans {wait//60}min {wait%60}s")
         await asyncio.sleep(wait + 30)
-        idx = await bec_get_index()
+        idx, temp_eau = await bec_get_index()
         if idx is not None:
             hc = is_heure_creuse()
-            save_transition(idx, hc)
+            save_transition(idx, hc, temp_eau)
         else:
             log("BEC transition : impossible de lire l'index")
 

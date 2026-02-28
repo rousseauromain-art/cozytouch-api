@@ -20,10 +20,10 @@ MY_SERVER    = SUPPORTED_SERVERS["atlantic_cozytouch"]
 
 # Transitions HC/HP (minutes depuis minuit, booléen = HC après transition)
 HC_TRANSITIONS = [
-    ( 1*60+56, True),   # 01:56 → HC commence
-    ( 7*60+56, False),  # 07:56 → HP commence
+    ( 0*60+56, True),   # 00:56 → HC commence
+    ( 6*60+26, False),  # 06:26 → HP commence
     (14*60+26, True),   # 14:26 → HC commence
-    (16*60+26, False),  # 16:26 → HP commence
+    (16*60+56, False),  # 16:56 → HP commence
 ]
 
 # Radiateurs — IDs physiques validés

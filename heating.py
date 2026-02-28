@@ -25,9 +25,13 @@ def init_db():
                 id SERIAL PRIMARY KEY,
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 index_kwh FLOAT NOT NULL,
-                heure_creuse BOOLEAN NOT NULL
+                heure_creuse BOOLEAN NOT NULL,
+                temp_eau FLOAT  -- température haut du ballon au moment de la transition
             );
         """)
+        conn.commit()
+        # Migration : ajouter temp_eau si DB existante sans cette colonne
+        cur.execute("ALTER TABLE bec_transitions ADD COLUMN IF NOT EXISTS temp_eau FLOAT")
         conn.commit(); cur.close(); conn.close()
         log("DB initialisée")
     except Exception as e:
