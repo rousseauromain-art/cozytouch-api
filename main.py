@@ -6,7 +6,8 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Cont
 
 from config import TOKEN, DB_URL, VERSION, log
 from bec import (manage_bec, bec_get_index, is_heure_creuse,
-                 get_hc_label, minutes_until_next_transition, save_transition)
+                 get_hc_label, minutes_until_next_transition, save_transition,
+                 reset_transitions)
 from heating import (get_current_data, apply_heating_mode, perform_record,
                      init_db, get_rad_stats)
 
@@ -21,6 +22,7 @@ def get_keyboard():
          InlineKeyboardButton("📈 CONSO HC/HP",    callback_data="BEC_STATS")],
         [InlineKeyboardButton("🏡 BALLON MAISON",  callback_data="BEC_HOME"),
          InlineKeyboardButton("✈️ BALLON ABSENCE", callback_data="BEC_ABSENCE")],
+        [InlineKeyboardButton("🗑️ RESET RELEVÉS",  callback_data="BEC_RESET")],
     ])
 
 
@@ -106,9 +108,19 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Actions BEC longues (jusqu'à 2-3min) : répondre immédiatement, traiter en background
     if action.startswith("BEC_"):
         bec_action = action[4:]
+        # RESET : synchrone et immédiat
+        if bec_action == "RESET":
+            ok = reset_transitions()
+            await context.bot.send_message(
+                chat_id,
+                "🗑️ Table relevés vidée ✅" if ok else "❌ Erreur lors du reset",
+                reply_markup=get_keyboard()
+            )
+            return
+
         labels = {
             "GET": "💧 Lecture ballon...",
-            "STATS": "📈 Calcul conso...",
+            "STATS": "📈 20 derniers relevés...",
             "HOME": "🏡 Retour maison ballon...\n<i>(peut prendre 1-2 min pour les 7 jours)</i>",
             "ABSENCE": "✈️ Mode absence ballon...\n<i>(peut prendre 1-2 min pour les 7 jours)</i>",
         }

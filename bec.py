@@ -65,33 +65,64 @@ def save_transition(index_kwh: float, heure_creuse: bool, temp_eau: float | None
     except Exception as e:
         log(f"Transition save ERR: {e}")
 
-def get_conso_stats(jours: int = 7):
-    """Retourne (conso_hc, conso_hp, nb_periodes, chute_temp_hp_moy)."""
+def get_transitions_log(limit: int = 20):
+    """Retourne les N derniers relevés avec calcul conso inter-période."""
     if not DB_URL:
-        return None
+        return None, None
     try:
         conn = psycopg2.connect(DB_URL)
         cur  = conn.cursor()
-        cur.execute("""SELECT timestamp, index_kwh, heure_creuse, temp_eau
-            FROM bec_transitions WHERE timestamp > NOW() - INTERVAL '%s days'
-            ORDER BY timestamp ASC""", (jours,))
-        rows = cur.fetchall(); cur.close(); conn.close()
-        if len(rows) < 2:
-            return None
-        hc_k = hp_k = 0.0; nb = 0; chutes = []
-        for i in range(len(rows) - 1):
-            _, is1, hc1, t1 = rows[i]
-            _, ie2, _,  t2 = rows[i + 1]
-            diff = ie2 - is1
-            if diff < 0: continue
-            if hc1: hc_k += diff
-            else:   hp_k += diff
-            if not hc1 and t1 is not None and t2 is not None:
-                chutes.append(t1 - t2)
-            nb += 1
-        return hc_k, hp_k, nb, (sum(chutes)/len(chutes) if chutes else None)
+        # Les 20 derniers dans l'ordre chronologique
+        cur.execute("""
+            SELECT timestamp, index_kwh, heure_creuse, temp_eau FROM (
+                SELECT * FROM bec_transitions ORDER BY timestamp DESC LIMIT %s
+            ) sub ORDER BY timestamp ASC
+        """, (limit,))
+        rows = cur.fetchall()
+        cur.close(); conn.close()
+        if not rows:
+            return None, None
+
+        # Calcul conso entre chaque paire consécutive
+        entries = []
+        for i, (ts, idx, hc, temp) in enumerate(rows):
+            delta = None
+            if i > 0:
+                prev_idx = rows[i-1][1]
+                d = idx - prev_idx
+                delta = d if d >= 0 else None
+            entries.append({
+                "ts": ts, "idx": idx, "hc": hc,
+                "temp": temp, "delta": delta
+            })
+
+        # Totaux HC/HP
+        hc_k = hp_k = 0.0
+        for e in entries:
+            if e["delta"] is None:
+                continue
+            if e["hc"]:
+                hc_k += e["delta"]
+            else:
+                hp_k += e["delta"]
+
+        return entries, (hc_k, hp_k)
     except Exception as e:
-        log(f"Conso stats ERR: {e}"); return None
+        log(f"Transitions ERR: {e}"); return None, None
+
+def reset_transitions():
+    """Vide la table bec_transitions."""
+    if not DB_URL:
+        return False
+    try:
+        conn = psycopg2.connect(DB_URL)
+        cur  = conn.cursor()
+        cur.execute("TRUNCATE TABLE bec_transitions")
+        conn.commit(); cur.close(); conn.close()
+        log("bec_transitions réinitialisée")
+        return True
+    except Exception as e:
+        log(f"Reset ERR: {e}"); return False
 
 
 # ---------------------------------------------------------------------------
@@ -299,19 +330,35 @@ async def manage_bec(action="GET"):
             # ── STATS : bilan conso HC/HP ──────────────────────────────────
             if action == "STATS":
                 s = get_conso_stats(7)
-                if not s:
-                    return "⚠️ Pas encore assez de données (4 relevés/jour aux transitions)."
-                hc_k, hp_k, nb, chute = s
-                tot = hc_k + hp_k
-                pct = (hc_k / tot * 100) if tot > 0 else 0
-                lines = [
-                    "📊 <b>CONSO BALLON — 7 JOURS</b>",
-                    f"🟢 Heures Creuses : <b>{hc_k:.2f} kWh</b> ({pct:.0f}%)",
-                    f"🔴 Heures Pleines : <b>{hp_k:.2f} kWh</b> ({100-pct:.0f}%)",
-                    f"⚡ Total : <b>{tot:.2f} kWh</b>  |  <i>{nb} périodes</i>",
-                ]
-                if chute is not None:
-                    lines.append(f"🌡️ Chute temp. HP : <b>−{chute:.1f}°C</b> en moyenne")
+                entries, totaux = get_transitions_log(20)
+                if not entries:
+                    return "⚠️ Aucun relevé en base. Les relevés sont pris à chaque transition HC/HP (4×/jour)."
+
+                lines = ["📋 <b>20 DERNIERS RELEVÉS BEC</b>", ""]
+                # En-tête
+                lines.append("<code>Date     Heure  HC/HP  Index kWh  ΔkWh   T°C</code>")
+                lines.append("<code>─────────────────────────────────────────────</code>")
+
+                for e in entries:
+                    ts    = e["ts"]
+                    hc_lbl = "🟢HC" if e["hc"] else "🔴HP"
+                    idx   = f"{e['idx']:.3f}"
+                    delta = f"+{e['delta']:.3f}" if e["delta"] is not None else "  — "
+                    temp  = f"{e['temp']:.1f}°C" if e["temp"] is not None else " —  "
+                    date  = ts.strftime("%d/%m")
+                    heure = ts.strftime("%H:%M")
+                    lines.append(f"<code>{date} {heure}  {hc_lbl}  {idx}  {delta}  {temp}</code>")
+
+                if totaux:
+                    hc_k, hp_k = totaux
+                    tot = hc_k + hp_k
+                    pct = (hc_k / tot * 100) if tot > 0 else 0
+                    lines += [
+                        "",
+                        f"🟢 HC total : <b>{hc_k:.3f} kWh</b> ({pct:.0f}%)",
+                        f"🔴 HP total : <b>{hp_k:.3f} kWh</b> ({100-pct:.0f}%)",
+                        f"⚡ Total    : <b>{tot:.3f} kWh</b>",
+                    ]
                 return "\n".join(lines)
 
             # ── ABSENCE : 60% tous les jours (sans déclencher le mode absence Atlantic)
@@ -345,15 +392,17 @@ async def manage_bec(action="GET"):
             )
             results = ["✓" if ok else "✗" for ok in ok_list]
 
-            detail = " ".join(f"{j}:{r}" for j, r in zip(jours, results))
-            if action == "ABSENCE":
-                return (f"✅ Quantités réduites à 60%\n"
-                        f"💧 Tous les jours : <b>60%</b> (50°C)\n"
-                        f"<i>{detail}</i>")
-            else:
-                return (f"✅ Quantités retour maison\n"
-                        f"💧 Lun-Ven : <b>80%</b> (56.7°C)  |  Sam-Dim : <b>100%</b> (63.3°C)\n"
-                        f"<i>{detail}</i>")
+            # Validation : relecture des caps après écriture
+            await asyncio.sleep(3)
+            r_check = await c.get(f"{ATLANTIC_API}/magellan/capabilities/?deviceId={dev_id}",
+                                  headers=h)
+            caps_check = {x["capabilityId"]: x["value"] for x in r_check.json()}
+            qtite_lines = decode_quantite_semaine(caps_check)
+            label = "✈️ <b>BALLON ABSENCE</b>" if action == "ABSENCE" else "🏡 <b>BALLON MAISON</b>"
+            return "\n".join([
+                f"{label} — validation",
+                "", "💧 <b>QUANTITÉ PAR JOUR (valeurs lues)</b>",
+            ] + qtite_lines)
 
         except Exception as e:
             log(f"BEC ERR: {e}"); return f"⚠️ {e}"
