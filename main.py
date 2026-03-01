@@ -1,4 +1,4 @@
-"""main.py — Bot Telegram chauffage + ballon eau chaude."""
+"""main.py — Bot Telegram chauffage + ballon eau chaude. v15.5"""
 import asyncio, threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -25,22 +25,45 @@ def get_keyboard():
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(f"🚀 v{VERSION}", reply_markup=get_keyboard())
+    await update.message.reply_text(f"🚀 Cozybot v{VERSION}", reply_markup=get_keyboard())
+
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    chat_id = query.message.chat_id
+
+    # Répondre IMMÉDIATEMENT à Telegram (évite "Query is too old" après 60s)
     try:
-        if query.data in ("HOME", "ABSENCE"):
-            await query.edit_message_text(f"⏳ Radiateurs {query.data}...")
-            report = await apply_heating_mode(query.data)
-            await query.edit_message_text(
-                f"<b>RÉSULTAT {query.data}</b>\n\n{report}",
+        await query.answer()
+    except Exception:
+        pass  # Déjà expiré si double-clic, on continue quand même
+
+    action = query.data
+
+    # Actions rapides (< 5s) : éditer le message en place
+    if action in ("HOME", "ABSENCE"):
+        try:
+            await query.edit_message_text(f"⏳ Radiateurs {action}...")
+        except Exception:
+            pass
+        try:
+            report = await apply_heating_mode(action)
+            await context.bot.send_message(
+                chat_id,
+                f"<b>RÉSULTAT {action}</b>\n\n{report}",
                 parse_mode="HTML", reply_markup=get_keyboard()
             )
+        except Exception as e:
+            log(f"Handler {action} ERR: {e}")
+            await context.bot.send_message(chat_id, f"⚠️ {e}", reply_markup=get_keyboard())
+        return
 
-        elif query.data == "LIST":
-            await query.edit_message_text("🔍 Lecture...")
+    if action == "LIST":
+        try:
+            await query.edit_message_text("🔍 Lecture radiateurs...")
+        except Exception:
+            pass
+        try:
             data, shelly_t = await get_current_data()
             lines = []
             for n, v in data.items():
@@ -48,12 +71,17 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if n == "Bureau" and shelly_t:
                     lines.append(f"   └ 🌡️ <i>Shelly : {shelly_t}°C</i>")
             lines.append(f"\n{get_hc_label()}")
-            await query.edit_message_text(
-                "🌡️ <b>ÉTAT ACTUEL</b>\n\n" + "\n".join(lines),
+            await context.bot.send_message(
+                chat_id, "🌡️ <b>ÉTAT ACTUEL</b>\n\n" + "\n".join(lines),
                 parse_mode="HTML", reply_markup=get_keyboard()
             )
+        except Exception as e:
+            log(f"Handler LIST ERR: {e}")
+            await context.bot.send_message(chat_id, f"⚠️ {e}", reply_markup=get_keyboard())
+        return
 
-        elif query.data == "REPORT":
+    if action == "REPORT":
+        try:
             data, shelly_t = await get_current_data()
             bureau = data.get("Bureau", {})
             s = get_rad_stats()
@@ -66,41 +94,80 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 lines.append(f"📈 Δ moyen 7j : <b>{s[0]:+.1f}°C</b>  <i>({s[1]} mesures)</i>")
             else:
                 lines.append("⚠️ Pas encore de données 7j.")
-            await query.message.reply_text("\n".join(lines), parse_mode="HTML")
-
-        elif query.data.startswith("BEC_"):
-            action = query.data[4:]
-            await query.edit_message_text(f"⏳ Ballon {action}...")
-            res = await manage_bec(action)
-            await query.edit_message_text(
-                f"<b>BALLON</b>\n\n{res[:4000]}",
+            await context.bot.send_message(
+                chat_id, "\n".join(lines),
                 parse_mode="HTML", reply_markup=get_keyboard()
             )
+        except Exception as e:
+            log(f"Handler REPORT ERR: {e}")
+            await context.bot.send_message(chat_id, f"⚠️ {e}", reply_markup=get_keyboard())
+        return
 
-    except Exception as e:
-        log(f"Handler ERR: {e}")
-        await query.edit_message_text(f"⚠️ {e}", reply_markup=get_keyboard())
+    # Actions BEC longues (jusqu'à 2-3min) : répondre immédiatement, traiter en background
+    if action.startswith("BEC_"):
+        bec_action = action[4:]
+        labels = {
+            "GET": "💧 Lecture ballon...",
+            "STATS": "📈 Calcul conso...",
+            "HOME": "🏡 Retour maison ballon...\n<i>(peut prendre 1-2 min pour les 7 jours)</i>",
+            "ABSENCE": "✈️ Mode absence ballon...\n<i>(peut prendre 1-2 min pour les 7 jours)</i>",
+        }
+        try:
+            await context.bot.send_message(
+                chat_id,
+                labels.get(bec_action, f"⏳ Ballon {bec_action}..."),
+                parse_mode="HTML"
+            )
+        except Exception:
+            pass
+
+        # Lancer en tâche asyncio (non bloquant pour Telegram)
+        async def run_bec():
+            try:
+                res = await manage_bec(bec_action)
+                # Découper si trop long (limite Telegram 4096 chars)
+                if len(res) > 4000:
+                    await context.bot.send_message(
+                        chat_id, f"<b>BALLON</b>\n\n{res[:4000]}",
+                        parse_mode="HTML"
+                    )
+                    await context.bot.send_message(
+                        chat_id, f"<i>...suite</i>\n{res[4000:8000]}",
+                        parse_mode="HTML", reply_markup=get_keyboard()
+                    )
+                else:
+                    await context.bot.send_message(
+                        chat_id, f"<b>BALLON</b>\n\n{res}",
+                        parse_mode="HTML", reply_markup=get_keyboard()
+                    )
+            except Exception as e:
+                log(f"BEC {bec_action} ERR: {e}")
+                await context.bot.send_message(
+                    chat_id, f"⚠️ {e}", reply_markup=get_keyboard()
+                )
+
+        asyncio.create_task(run_bec())
 
 
 # ---------------------------------------------------------------------------
-# BACKGROUND
+# BACKGROUND TASKS
 # ---------------------------------------------------------------------------
 async def background_transition_logger():
-    """Relevé BEC à chaque transition HC/HP (4x par jour).
-    Enregistre index kWh + température eau → calcul conso HC vs HP."""
+    """Relevé BEC à chaque transition HC/HP (4× par jour).
+    Enregistre index kWh + température eau haut ballon."""
     while True:
         wait = minutes_until_next_transition()
         log(f"Prochain relevé BEC dans {wait//60}min {wait%60}s")
-        await asyncio.sleep(wait + 30)   # +30s pour être sûr d'être dans le bon slot
+        await asyncio.sleep(wait + 30)  # +30s pour être dans le bon slot
         idx, temp_eau = await bec_get_index()
         if idx is not None:
             hc = is_heure_creuse()
             save_transition(idx, hc, temp_eau)
         else:
-            log("BEC transition : impossible de lire l'index")
+            log("BEC transition : échec lecture index")
 
 async def background_rad_logger():
-    """Enregistrement horaire radiateurs."""
+    """Enregistrement horaire températures radiateurs."""
     while True:
         await asyncio.sleep(3600)
         if DB_URL:
@@ -108,7 +175,7 @@ async def background_rad_logger():
 
 
 # ---------------------------------------------------------------------------
-# HEALTH + MAIN
+# HEALTH CHECK + MAIN
 # ---------------------------------------------------------------------------
 class Health(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -124,9 +191,13 @@ def main():
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CallbackQueryHandler(button_handler))
-    loop = asyncio.get_event_loop()
-    loop.create_task(background_transition_logger())
-    loop.create_task(background_rad_logger())
+
+    async def post_init(application):
+        loop = asyncio.get_event_loop()
+        loop.create_task(background_transition_logger())
+        loop.create_task(background_rad_logger())
+
+    app.post_init = post_init
     log(f"DÉMARRAGE v{VERSION}")
     app.run_polling(drop_pending_updates=True)
 

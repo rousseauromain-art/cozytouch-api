@@ -173,19 +173,31 @@ async def bec_get_index() -> tuple[float | None, float | None]:
 # ---------------------------------------------------------------------------
 async def write_capability(c: httpx.AsyncClient, h: dict, dev_id: int,
                            cap_id: int, value) -> bool:
-    r = await c.post(f"{ATLANTIC_API}/magellan/executions/writecapability",
-                     json={"capabilityId": cap_id, "deviceId": dev_id, "value": str(value)},
-                     headers=h, timeout=15)
-    if r.status_code != 201:
-        log(f"writecap {cap_id}={value} → HTTP {r.status_code}")
-        return False
-    exec_id = r.json()
-    for _ in range(8):
-        await asyncio.sleep(1)
-        r2 = await c.get(f"{ATLANTIC_API}/magellan/executions/{exec_id}", headers=h, timeout=10)
-        state = r2.json().get("state", 0) if r2.status_code == 200 else 0
-        if state == 3: return True
-        if state not in (1, 2): break
+    """Écrit une cap avec retry x2 et poll état jusqu'à 15s."""
+    for attempt in range(2):
+        try:
+            r = await c.post(f"{ATLANTIC_API}/magellan/executions/writecapability",
+                             json={"capabilityId": cap_id, "deviceId": dev_id, "value": str(value)},
+                             headers=h, timeout=15)
+            if r.status_code != 201:
+                log(f"writecap {cap_id} attempt {attempt+1} → HTTP {r.status_code}")
+                if attempt == 0:
+                    await asyncio.sleep(3)
+                continue
+            exec_id = r.json()
+            for _ in range(15):  # poll jusqu'à 30s
+                await asyncio.sleep(2)
+                r2 = await c.get(f"{ATLANTIC_API}/magellan/executions/{exec_id}",
+                                 headers=h, timeout=10)
+                state = r2.json().get("state", 0) if r2.status_code == 200 else 0
+                if state == 3:
+                    return True
+                if state not in (1, 2):
+                    break
+        except Exception as e:
+            log(f"writecap {cap_id} attempt {attempt+1} exception: {e}")
+            if attempt == 0:
+                await asyncio.sleep(3)
     return False
 
 
@@ -319,14 +331,19 @@ async def manage_bec(action="GET"):
             else:
                 return "❓ Action inconnue"
 
-            results = []
-            for i, cap_id in enumerate(CAPS_QTITE):
+            # Écriture parallèle des 7 jours → réduit le temps de ~90s à ~20s
+            async def write_one(i, cap_id):
                 pct = cibles[cap_id]
                 T   = pct_to_temp(pct)
                 slot_val = json.dumps([[0, T], [0, 0], [0, 0], [0, 0]])
                 ok = await write_capability(c, h, dev_id, cap_id, slot_val)
-                results.append("✓" if ok else "✗")
                 log(f"BEC write cap{cap_id} ({jours[i]})={pct}% ({T}°C) → {'OK' if ok else 'ERR'}")
+                return ok
+
+            ok_list = await asyncio.gather(
+                *[write_one(i, cap_id) for i, cap_id in enumerate(CAPS_QTITE)]
+            )
+            results = ["✓" if ok else "✗" for ok in ok_list]
 
             detail = " ".join(f"{j}:{r}" for j, r in zip(jours, results))
             if action == "ABSENCE":
