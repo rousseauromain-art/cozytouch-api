@@ -3,23 +3,13 @@ import asyncio, json, httpx, psycopg2
 from datetime import datetime
 from config import ATLANTIC_API, CLIENT_BASIC, BEC_USER, BEC_PASS, DB_URL, HC_TRANSITIONS, log
 
-# Formule quantité : %qty = 3×T − 90  ↔  T = (%+90)/3
-# Observé : 50°C→60%, 53.3°C→70%, 60°C→90%
-# cap237=Lun cap238=Mar cap239=Mer cap240=Jeu cap241=Ven cap242=Sam cap243=Dim
-CAPS_QTITE_JOURS = [237, 238, 239, 240, 241, 242, 243]
+# cap237-243 = consigne quantité par jour (Lun→Dim)
+# Formule confirmée : % affiché app = 3×T − 90  ↔  T = (%+90)/3
+# Exemple : 60% → 50°C, 80% → 56.7°C, 100% → 63.3°C
+CAPS_QTITE = [237, 238, 239, 240, 241, 242, 243]
 
 def pct_to_temp(pct: int) -> float:
-    """Convertit un % de quantité en température °C pour cap237-243."""
     return round((pct + 90) / 3, 1)
-
-def temp_to_pct(t_str) -> str:
-    """Convertit une température (str) en % de quantité affiché."""
-    try:
-        t = float(t_str)
-        pct = round(3 * t - 90)
-        return f"{pct}%"
-    except:
-        return "?%"
 
 
 # ---------------------------------------------------------------------------
@@ -53,7 +43,7 @@ def minutes_until_next_transition() -> int:
 
 
 # ---------------------------------------------------------------------------
-# DB — transitions HC/HP
+# DB — transitions HC/HP (relevé à chaque début de HC)
 # ---------------------------------------------------------------------------
 def save_transition(index_kwh: float, heure_creuse: bool, temp_eau: float | None = None):
     if not DB_URL:
@@ -71,6 +61,7 @@ def save_transition(index_kwh: float, heure_creuse: bool, temp_eau: float | None
         log(f"Transition save ERR: {e}")
 
 def get_conso_stats(jours: int = 7):
+    """Retourne (conso_hc, conso_hp, nb_periodes, chute_temp_hp_moy)."""
     if not DB_URL:
         return None
     try:
@@ -85,7 +76,7 @@ def get_conso_stats(jours: int = 7):
         hc_k = hp_k = 0.0; nb = 0; chutes = []
         for i in range(len(rows) - 1):
             _, is1, hc1, t1 = rows[i]
-            _, ie2, hc2, t2 = rows[i + 1]
+            _, ie2, _,  t2 = rows[i + 1]
             diff = ie2 - is1
             if diff < 0: continue
             if hc1: hc_k += diff
@@ -109,7 +100,7 @@ def find_water_heater(devices: list) -> dict | None:
     return devices[0] if len(devices) == 1 else None
 
 def decode_hc_schedule(raw) -> str:
-    """Décode cap245-251 : plages HC/HP stockées en minutes."""
+    """Décode cap245-251 : plages HC en minutes depuis minuit."""
     try:
         slots = json.loads(str(raw)) if isinstance(raw, str) else raw
         plages = [f"{s[0]//60:02d}h{s[0]%60:02d}→{s[1]//60:02d}h{s[1]%60:02d}"
@@ -119,24 +110,25 @@ def decode_hc_schedule(raw) -> str:
         return str(raw)
 
 def decode_quantite_semaine(caps: dict) -> list[str]:
-    """Décode les cap237-243 en % de quantité par jour."""
+    """Décode cap237-243 → % quantité par jour (formule : % = 3T-90)."""
     jours = ["Lun","Mar","Mer","Jeu","Ven","Sam","Dim"]
     lines = []
-    for i, cap_id in enumerate(CAPS_QTITE_JOURS):
+    for i, cap_id in enumerate(CAPS_QTITE):
         val = caps.get(cap_id)
-        if val is not None:
-            try:
-                slots = json.loads(str(val)) if isinstance(val, str) else val
-                t = float(slots[0][1]) if isinstance(slots, list) else float(val)
-                pct = round(3 * t - 90)
-                lines.append(f"  {jours[i]}: <b>{pct}%</b> ({t:.0f}°C)")
-            except:
-                lines.append(f"  {jours[i]}: {val}")
+        if val is None:
+            continue
+        try:
+            slots = json.loads(str(val)) if isinstance(val, str) else val
+            t = float(slots[0][1]) if isinstance(slots, list) else float(val)
+            pct = round(3 * t - 90)
+            lines.append(f"  {jours[i]}: <b>{pct}%</b> ({t:.0f}°C)")
+        except:
+            lines.append(f"  {jours[i]}: {val}")
     return lines
 
 
 # ---------------------------------------------------------------------------
-# AUTH + INDEX
+# AUTH
 # ---------------------------------------------------------------------------
 async def bec_authenticate():
     async with httpx.AsyncClient() as c:
@@ -152,6 +144,7 @@ async def bec_authenticate():
         return None
 
 async def bec_get_index() -> tuple[float | None, float | None]:
+    """Relevé à chaque transition : retourne (index_kWh, temp_haut_ballon)."""
     token = await bec_authenticate()
     if not token: return None, None
     h = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
@@ -164,7 +157,8 @@ async def bec_get_index() -> tuple[float | None, float | None]:
         if r2.status_code != 200: return None, None
         caps = {x["capabilityId"]: x["value"] for x in r2.json()}
         idx  = float(caps.get(59, 0)) / 1000
-        t_raw = caps.get(266, caps.get(265, None))
+        # cap266 = haut du ballon, sinon cap265 = milieu
+        t_raw = caps.get(266, caps.get(265))
         temp  = float(t_raw) if t_raw is not None else None
         return idx, temp
 
@@ -201,7 +195,7 @@ async def manage_bec(action="GET"):
         return "❌ Auth Magellan échouée"
     h = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
-    async with httpx.AsyncClient(timeout=15) as c:
+    async with httpx.AsyncClient(timeout=30) as c:
         try:
             r = await c.get(f"{ATLANTIC_API}/magellan/cozytouch/setupviewv2", headers=h)
             if r.status_code != 200:
@@ -213,34 +207,33 @@ async def manage_bec(action="GET"):
                 return f"❓ Non trouvé. Devices: {[d.get('name') for d in setup.get('devices',[])]}"
             dev_id = dev.get("deviceId")
 
+            # ── GET : état complet ─────────────────────────────────────────
             if action == "GET":
                 r2   = await c.get(f"{ATLANTIC_API}/magellan/capabilities/?deviceId={dev_id}", headers=h)
                 caps = {x["capabilityId"]: x["value"] for x in r2.json()}
                 log(f"BEC caps: {caps}")
 
-                # État chauffe
-                nom_w = int(float(caps.get(164, 0)))
-                res99 = str(caps.get(99, "0"))
+                nom_w  = int(float(caps.get(164, 0)))
+                res99  = str(caps.get(99, "0"))
                 temp_c = float(caps.get(22, 0))
-                idx   = float(caps.get(59, 0)) / 1000
-                hc    = is_heure_creuse()
-                mode  = {0:"Manuel",3:"Eco+",4:"Prog HC/HP"}.get(int(float(caps.get(87,0))), "?")
-                boost = "🟢 ON" if str(caps.get(165,"0")) not in ("0","false") else "OFF"
+                idx    = float(caps.get(59, 0)) / 1000
+                hc     = is_heure_creuse()
+                mode   = {0:"Manuel",3:"Eco+",4:"Prog HC/HP"}.get(int(float(caps.get(87,0))), "?")
+                boost  = "🟢 ON" if str(caps.get(165,"0")) not in ("0","false") else "OFF"
+
                 chauffe = (f"🔥 CHAUFFE ({nom_w}W) — {'✅ HC' if hc else '⚠️ HP'}"
                            if res99 != "0" else "💤 En veille")
                 resist  = ("🟢 ON — chauffe active" if res99 != "0"
                            else f"🔴 OFF  (nominale : {nom_w}W)")
 
-                # Températures eau
                 def ft(v): return f"{float(v):.1f}°C" if v is not None else "—"
-                def fv(v): return f"{float(v):.0f}L" if v is not None else "—"
+                def fv(v): return f"{float(v):.0f}L"  if v is not None else "—"
 
                 t_haut = caps.get(266); t_mil = caps.get(265); t_bas = caps.get(267)
                 v40    = caps.get(268); v40tot = caps.get(270); pct_v = caps.get(271)
 
-                # Absence
                 absent = {0:"🏡 Normal",1:"✈️ Activé",2:"⏳ En attente"}.get(
-                    int(float(caps.get(227,0))), "?")
+                    int(float(caps.get(227, 0))), "?")
                 try:
                     ts  = caps.get(222, "[0,0]")
                     tsl = json.loads(str(ts)) if isinstance(ts, str) else ts
@@ -249,26 +242,19 @@ async def manage_bec(action="GET"):
                              ) if tsl and int(tsl[0]) > 0 else "aucune"
                 except: dates = "?"
 
-                # Plages HC stockées dans le ballon (cap245 = Lun, identique tous les jours)
-                hc_schedule = decode_hc_schedule(caps.get(245))
-
-                # Quantité par jour
+                hc_sched = decode_hc_schedule(caps.get(245))
                 qtite_lines = decode_quantite_semaine(caps)
 
                 # Toutes les caps triées
-                all_caps_lines = []
+                all_caps = []
                 for cid in sorted(caps.keys()):
-                    val = caps[cid]
-                    if isinstance(val, str) and val.startswith("[["):
-                        # Valeur JSON complexe : afficher compacte
-                        val_str = val.replace(" ", "")[:60]
+                    v = caps[cid]
+                    if isinstance(v, str) and v.startswith("[["):
+                        vs = v.replace(" ", "")[:60]
                     else:
-                        try:
-                            f = float(val)
-                            val_str = f"{f:.3f}".rstrip('0').rstrip('.')
-                        except:
-                            val_str = str(val)[:60]
-                    all_caps_lines.append(f"  cap{cid} = {val_str}")
+                        try:   vs = f"{float(v):.3f}".rstrip('0').rstrip('.')
+                        except: vs = str(v)[:60]
+                    all_caps.append(f"  cap{cid} = {vs}")
 
                 return "\n".join([
                     f"💧 <b>{dev.get('name','Chauffe-eau')}</b> (id={dev_id})",
@@ -280,23 +266,24 @@ async def manage_bec(action="GET"):
                     "", "🌡️ <b>TEMPÉRATURES EAU</b>",
                     f"  Haut(266):{ft(t_haut)}  Mil(265):{ft(t_mil)}  Bas(267):{ft(t_bas)}",
                     "", "💦 <b>DISPONIBILITÉ</b>",
-                    f"  V40 dispo(268): <b>{fv(v40)}</b> / {fv(v40tot)}  →  <b>{float(pct_v):.0f}%</b>" if pct_v else "  V40: —",
+                    f"  V40 dispo(268): <b>{fv(v40)}</b> / {fv(v40tot)}  →  <b>{float(pct_v or 0):.0f}%</b>",
                     "", "📅 <b>PLAGES HC BALLON (cap245-251)</b>",
-                    f"  {hc_schedule}",
-                    "", "💧 <b>QUANTITÉ EAU PAR JOUR (cap237-243)</b>",
+                    f"  {hc_sched}",
+                    "", "💧 <b>QUANTITÉ PAR JOUR (cap237-243)</b>",
                 ] + qtite_lines + [
                     "", "📊 <b>CONSO</b>",
-                    f"  Index total (cap59): <b>{idx:.3f} kWh</b>",
+                    f"  Index total (cap59) : <b>{idx:.3f} kWh</b>",
                     f"  Index partiel(cap168): {float(caps.get(168,0))/1000:.3f} kWh",
                     "", "✈️ <b>ABSENCE</b>",
                     f"  {absent}  |  {dates}",
                     "", "📋 <b>TOUTES LES CAPABILITIES</b>",
-                ] + all_caps_lines)
+                ] + all_caps)
 
+            # ── STATS : bilan conso HC/HP ──────────────────────────────────
             if action == "STATS":
                 s = get_conso_stats(7)
                 if not s:
-                    return "⚠️ Pas encore assez de données (4 relevés/jour aux transitions HC/HP)."
+                    return "⚠️ Pas encore assez de données (4 relevés/jour aux transitions)."
                 hc_k, hp_k, nb, chute = s
                 tot = hc_k + hp_k
                 pct = (hc_k / tot * 100) if tot > 0 else 0
@@ -307,51 +294,43 @@ async def manage_bec(action="GET"):
                     f"⚡ Total : <b>{tot:.2f} kWh</b>  |  <i>{nb} périodes</i>",
                 ]
                 if chute is not None:
-                    lines.append(f"🌡️ Chute temp. en HP : <b>−{chute:.1f}°C</b> en moyenne")
+                    lines.append(f"🌡️ Chute temp. HP : <b>−{chute:.1f}°C</b> en moyenne")
                 return "\n".join(lines)
 
-            # Payload commun ABSENCE / HOME
-            payload = {k: setup[k] for k in
-                       ("address","area","currency","mainHeatingEnergy","mainDHWEnergy",
-                        "name","numberOfPersons","numberOfRooms","setupBuildingDate","type")
-                       if k in setup}
+            # ── ABSENCE : 60% tous les jours (sans déclencher le mode absence Atlantic)
+            # ── HOME    : 80% semaine (Lun-Ven) + 100% weekend (Sam-Dim)
+            # Pas d'appel PUT setup → pas de procédure de réchauffage forcé Atlantic
+            jours = ["Lun","Mar","Mer","Jeu","Ven","Sam","Dim"]
 
             if action == "ABSENCE":
-                now = int(datetime.now().timestamp())
-                payload["absence"] = {"startDate": now, "endDate": now + 30*24*3600}
-                pct_cible = 60
+                # 60% sur les 7 jours → T = (60+90)/3 = 50°C
+                cibles = {cap_id: 60 for cap_id in CAPS_QTITE}
             elif action == "HOME":
-                payload["absence"] = {}
-                pct_cible = 100
+                # Lun-Ven (cap237-241) = 80% → T = (80+90)/3 = 56.7°C
+                # Sam-Dim (cap242-243) = 100% → T = (100+90)/3 = 63.3°C
+                cibles = {}
+                for i, cap_id in enumerate(CAPS_QTITE):
+                    cibles[cap_id] = 100 if i >= 5 else 80  # i=5→Sam, i=6→Dim
             else:
                 return "❓ Action inconnue"
 
-            # 1. Setup absence
-            r = await c.put(f"{ATLANTIC_API}/magellan/v2/setups/{setup_id}", json=payload, headers=h)
-            log(f"BEC {action} setup: {r.status_code}")
-            if r.status_code not in (200, 204):
-                return f"❌ Erreur setup {r.status_code}"
-
-            # 2. Écrire quantité sur chaque jour (cap237-243)
-            # Format : [[0, T], [0,0], [0,0], [0,0]] en JSON string
-            T = pct_to_temp(pct_cible)
-            slot_val = json.dumps([[0, T], [0,0], [0,0], [0,0]])
             results = []
-            for cap_id in CAPS_QTITE_JOURS:
+            for i, cap_id in enumerate(CAPS_QTITE):
+                pct = cibles[cap_id]
+                T   = pct_to_temp(pct)
+                slot_val = json.dumps([[0, T], [0, 0], [0, 0], [0, 0]])
                 ok = await write_capability(c, h, dev_id, cap_id, slot_val)
                 results.append("✓" if ok else "✗")
-                log(f"BEC write cap{cap_id}={pct_cible}% ({T}°C) → {'OK' if ok else 'ERR'}")
+                log(f"BEC write cap{cap_id} ({jours[i]})={pct}% ({T}°C) → {'OK' if ok else 'ERR'}")
 
-            jours = ["Lun","Mar","Mer","Jeu","Ven","Sam","Dim"]
-            detail = " ".join(f"{j}:{r}" for j,r in zip(jours, results))
-
+            detail = " ".join(f"{j}:{r}" for j, r in zip(jours, results))
             if action == "ABSENCE":
-                return (f"✅ Mode absence activé (30j)\n"
-                        f"💧 Quantité → <b>{pct_cible}%</b> ({T}°C) sur toute la semaine\n"
+                return (f"✅ Quantités réduites à 60%\n"
+                        f"💧 Tous les jours : <b>60%</b> (50°C)\n"
                         f"<i>{detail}</i>")
             else:
-                return (f"✅ Ballon mode normal\n"
-                        f"💧 Quantité → <b>{pct_cible}%</b> ({T}°C) sur toute la semaine\n"
+                return (f"✅ Quantités retour maison\n"
+                        f"💧 Lun-Ven : <b>80%</b> (56.7°C)  |  Sam-Dim : <b>100%</b> (63.3°C)\n"
                         f"<i>{detail}</i>")
 
         except Exception as e:

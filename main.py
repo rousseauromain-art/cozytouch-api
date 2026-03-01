@@ -11,34 +11,26 @@ from heating import (get_current_data, apply_heating_mode, perform_record,
                      init_db, get_rad_stats)
 
 
-# ---------------------------------------------------------------------------
-# CLAVIER
-# ---------------------------------------------------------------------------
 def get_keyboard():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🏠 MAISON",          callback_data="HOME"),
-         InlineKeyboardButton("❄️ ABSENCE",         callback_data="ABSENCE")],
-        [InlineKeyboardButton("🔍 ÉTAT RADS",       callback_data="LIST"),
-         InlineKeyboardButton("📊 STATS 7J",        callback_data="REPORT")],
-        [InlineKeyboardButton("💧 BALLON ÉTAT",     callback_data="BEC_GET"),
-         InlineKeyboardButton("📈 CONSO HC/HP",     callback_data="BEC_STATS")],
-        [InlineKeyboardButton("🏡 BALLON MAISON",   callback_data="BEC_HOME"),
-         InlineKeyboardButton("✈️ BALLON ABSENCE",  callback_data="BEC_ABSENCE")],
+        [InlineKeyboardButton("🏠 MAISON",         callback_data="HOME"),
+         InlineKeyboardButton("❄️ ABSENCE",        callback_data="ABSENCE")],
+        [InlineKeyboardButton("🔍 ÉTAT RADS",      callback_data="LIST"),
+         InlineKeyboardButton("📊 STATS 7J",       callback_data="REPORT")],
+        [InlineKeyboardButton("💧 BALLON ÉTAT",    callback_data="BEC_GET"),
+         InlineKeyboardButton("📈 CONSO HC/HP",    callback_data="BEC_STATS")],
+        [InlineKeyboardButton("🏡 BALLON MAISON",  callback_data="BEC_HOME"),
+         InlineKeyboardButton("✈️ BALLON ABSENCE", callback_data="BEC_ABSENCE")],
     ])
 
 
-# ---------------------------------------------------------------------------
-# HANDLERS
-# ---------------------------------------------------------------------------
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"🚀 v{VERSION}", reply_markup=get_keyboard())
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-
     try:
-        # --- Radiateurs ---
         if query.data in ("HOME", "ABSENCE"):
             await query.edit_message_text(f"⏳ Radiateurs {query.data}...")
             report = await apply_heating_mode(query.data)
@@ -62,16 +54,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
         elif query.data == "REPORT":
-            # Températures actuelles Bureau
             data, shelly_t = await get_current_data()
             bureau = data.get("Bureau", {})
-            rad_t  = bureau.get("temp")
-            # Delta moyen 7 jours
             s = get_rad_stats()
             lines = ["📊 <b>BILAN BUREAU</b>"]
-            if rad_t is not None:
-                lines.append(f"🌡️ Radiateur actuel : <b>{rad_t}°C</b>")
-            if shelly_t is not None:
+            if bureau.get("temp"):
+                lines.append(f"🌡️ Radiateur actuel : <b>{bureau['temp']}°C</b>")
+            if shelly_t:
                 lines.append(f"🌡️ Shelly actuel    : <b>{shelly_t}°C</b>")
             if s and s[1] > 0:
                 lines.append(f"📈 Δ moyen 7j : <b>{s[0]:+.1f}°C</b>  <i>({s[1]} mesures)</i>")
@@ -79,7 +68,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 lines.append("⚠️ Pas encore de données 7j.")
             await query.message.reply_text("\n".join(lines), parse_mode="HTML")
 
-        # --- Ballon ---
         elif query.data.startswith("BEC_"):
             action = query.data[4:]
             await query.edit_message_text(f"⏳ Ballon {action}...")
@@ -98,11 +86,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # BACKGROUND
 # ---------------------------------------------------------------------------
 async def background_transition_logger():
-    """Relevé BEC aux 4 transitions HC/HP journalières."""
+    """Relevé BEC à chaque transition HC/HP (4x par jour).
+    Enregistre index kWh + température eau → calcul conso HC vs HP."""
     while True:
         wait = minutes_until_next_transition()
         log(f"Prochain relevé BEC dans {wait//60}min {wait%60}s")
-        await asyncio.sleep(wait + 30)
+        await asyncio.sleep(wait + 30)   # +30s pour être sûr d'être dans le bon slot
         idx, temp_eau = await bec_get_index()
         if idx is not None:
             hc = is_heure_creuse()
@@ -111,7 +100,7 @@ async def background_transition_logger():
             log("BEC transition : impossible de lire l'index")
 
 async def background_rad_logger():
-    """Enregistrement horaire des radiateurs."""
+    """Enregistrement horaire radiateurs."""
     while True:
         await asyncio.sleep(3600)
         if DB_URL:
@@ -119,13 +108,12 @@ async def background_rad_logger():
 
 
 # ---------------------------------------------------------------------------
-# HEALTH CHECK + MAIN
+# HEALTH + MAIN
 # ---------------------------------------------------------------------------
 class Health(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200); self.end_headers(); self.wfile.write(b"OK")
-    def log_message(self, *a):
-        pass
+    def log_message(self, *a): pass
 
 def main():
     init_db()

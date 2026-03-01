@@ -2,7 +2,7 @@
 import os, time
 from pyoverkiz.const import SUPPORTED_SERVERS
 
-VERSION = "15.4 (Split 3 fichiers)"
+VERSION = "15.5"
 
 TOKEN            = os.getenv("TELEGRAM_TOKEN")
 OVERKIZ_EMAIL    = os.getenv("OVERKIZ_EMAIL")
@@ -26,7 +26,7 @@ HC_TRANSITIONS = [
     (16*60+56, False),  # 16:56 → HP commence
 ]
 
-# Radiateurs — IDs physiques validés
+# Radiateurs
 CONFORT_VALS = {
     "14253355#1": {"name": "Salon",          "temp": 19.5, "eco": 16.0},
     "190387#1":   {"name": "Chambre",         "temp": 19.0, "eco": 16.0},
