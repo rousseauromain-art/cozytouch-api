@@ -329,7 +329,6 @@ async def manage_bec(action="GET"):
 
             # ── STATS : bilan conso HC/HP ──────────────────────────────────
             if action == "STATS":
-                s = get_conso_stats(7)
                 entries, totaux = get_transitions_log(20)
                 if not entries:
                     return "⚠️ Aucun relevé en base. Les relevés sont pris à chaque transition HC/HP (4×/jour)."
