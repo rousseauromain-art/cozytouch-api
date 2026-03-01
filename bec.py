@@ -9,7 +9,12 @@ from config import ATLANTIC_API, CLIENT_BASIC, BEC_USER, BEC_PASS, DB_URL, HC_TR
 CAPS_QTITE = [237, 238, 239, 240, 241, 242, 243]
 
 def pct_to_temp(pct: int) -> float:
-    return round((pct + 90) / 3, 1)
+    """% app → °C. 100% = 65°C (max cap252). Autres : T=(pct+90)/3."""
+    return 65.0 if pct >= 100 else round((pct + 90) / 3, 1)
+
+def temp_to_pct(t: float) -> int:
+    """°C → % app, plafonné à 100% (65°C donne 105 sans plafond)."""
+    return min(round(3 * t - 90), 100)
 
 
 # ---------------------------------------------------------------------------
@@ -120,7 +125,7 @@ def decode_quantite_semaine(caps: dict) -> list[str]:
         try:
             slots = json.loads(str(val)) if isinstance(val, str) else val
             t = float(slots[0][1]) if isinstance(slots, list) else float(val)
-            pct = round(3 * t - 90)
+            pct = min(round(3 * t - 90), 100)  # 65°C → 100% (plafonné)
             lines.append(f"  {jours[i]}: <b>{pct}%</b> ({t:.0f}°C)")
         except:
             lines.append(f"  {jours[i]}: {val}")
