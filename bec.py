@@ -83,25 +83,29 @@ def get_transitions_log(limit: int = 20):
         if not rows:
             return None, None
 
-        # Calcul conso entre chaque paire consécutive
+        # Calcul conso : delta attribué au statut du DEBUT de période (ligne i-1)
+        # Ex: 00h56(HC)→06h26(HP) : +1.514kWh consommés PENDANT HC, pas HP
         entries = []
         for i, (ts, idx, hc, temp) in enumerate(rows):
             delta = None
+            delta_hc = hc  # statut par défaut
             if i > 0:
                 prev_idx = rows[i-1][1]
+                prev_hc  = rows[i-1][2]  # statut au DEBUT de la période
                 d = idx - prev_idx
                 delta = d if d >= 0 else None
+                delta_hc = prev_hc       # conso = période précédente
             entries.append({
                 "ts": ts, "idx": idx, "hc": hc,
-                "temp": temp, "delta": delta
+                "temp": temp, "delta": delta, "delta_hc": delta_hc
             })
 
-        # Totaux HC/HP
+        # Totaux basés sur le statut du début de période
         hc_k = hp_k = 0.0
         for e in entries:
             if e["delta"] is None:
                 continue
-            if e["hc"]:
+            if e["delta_hc"]:
                 hc_k += e["delta"]
             else:
                 hp_k += e["delta"]
@@ -334,18 +338,21 @@ async def manage_bec(action="GET"):
                     return "⚠️ Aucun relevé en base. Les relevés sont pris à chaque transition HC/HP (4×/jour)."
 
                 lines = ["📋 <b>20 DERNIERS RELEVÉS BEC</b>", ""]
-                # En-tête
-                lines.append("<code>Date     Heure  HC/HP  Index kWh  ΔkWh   T°C</code>")
-                lines.append("<code>─────────────────────────────────────────────</code>")
+                lines.append("<code>Date  Heure  État   Index    Δ(HC/HP période)  T°C</code>")
+                lines.append("<code>──────────────────────────────────────────────────</code>")
 
                 for e in entries:
-                    ts    = e["ts"]
+                    ts     = e["ts"]
                     hc_lbl = "🟢HC" if e["hc"] else "🔴HP"
-                    idx   = f"{e['idx']:.3f}"
-                    delta = f"+{e['delta']:.3f}" if e["delta"] is not None else "  — "
-                    temp  = f"{e['temp']:.1f}°C" if e["temp"] is not None else " —  "
-                    date  = ts.strftime("%d/%m")
-                    heure = ts.strftime("%H:%M")
+                    idx    = f"{e['idx']:.3f}"
+                    temp   = f"{e['temp']:.1f}°C" if e["temp"] is not None else "  — "
+                    date   = ts.strftime("%d/%m")
+                    heure  = ts.strftime("%H:%M")
+                    if e["delta"] is not None:
+                        d_lbl = "🟢" if e["delta_hc"] else "🔴"
+                        delta = f"{d_lbl}+{e['delta']:.3f}"
+                    else:
+                        delta = "          —    "
                     lines.append(f"<code>{date} {heure}  {hc_lbl}  {idx}  {delta}  {temp}</code>")
 
                 if totaux:
