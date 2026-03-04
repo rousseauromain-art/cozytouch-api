@@ -114,6 +114,32 @@ def get_transitions_log(limit: int = 20):
     except Exception as e:
         log(f"Transitions ERR: {e}"); return None, None
 
+def get_absence_days() -> int | None:
+    """Retourne le nombre de jours consécutifs où tous les jours sont à 60% (50°C).
+    Utilise les transitions BEC : si la dernière consigne vue est 50°C depuis N jours."""
+    if not DB_URL:
+        return None
+    try:
+        conn = psycopg2.connect(DB_URL)
+        cur  = conn.cursor()
+        # Prend le premier relevé avec temp_eau < 52°C (proche 50°C après chauffe)
+        # et vérifie depuis combien de temps c'est le cas
+        cur.execute("""
+            SELECT MIN(timestamp) FROM bec_transitions
+            WHERE id >= (
+                SELECT COALESCE(MAX(id), 0) FROM bec_transitions
+                WHERE temp_eau IS NOT NULL AND temp_eau > 55.0
+            )
+        """)
+        row = cur.fetchone(); cur.close(); conn.close()
+        if row and row[0]:
+            from datetime import datetime, timezone
+            delta = datetime.now() - row[0].replace(tzinfo=None)
+            return delta.days
+        return None
+    except Exception as e:
+        log(f"get_absence_days ERR: {e}"); return None
+
 def reset_transitions():
     """Vide la table bec_transitions."""
     if not DB_URL:
@@ -297,39 +323,26 @@ async def manage_bec(action="GET"):
                 hc_sched = decode_hc_schedule(caps.get(245))
                 qtite_lines = decode_quantite_semaine(caps)
 
-                # Toutes les caps triées
-                all_caps = []
-                for cid in sorted(caps.keys()):
-                    v = caps[cid]
-                    if isinstance(v, str) and v.startswith("[["):
-                        vs = v.replace(" ", "")[:60]
-                    else:
-                        try:   vs = f"{float(v):.3f}".rstrip('0').rstrip('.')
-                        except: vs = str(v)[:60]
-                    all_caps.append(f"  cap{cid} = {vs}")
-
                 return "\n".join([
-                    f"💧 <b>{dev.get('name','Chauffe-eau')}</b> (id={dev_id})",
+                    f"💧 <b>{dev.get('name','Chauffe-eau')}</b>",
                     "", "⚡ <b>ÉTAT</b>",
                     f"  {chauffe}",
                     f"  Consigne : <b>{temp_c:.0f}°C</b>  Mode : <b>{mode}</b>",
                     f"  Résistance : {resist}  |  Boost : {boost}",
                     f"  {get_hc_label()}",
                     "", "🌡️ <b>TEMPÉRATURES EAU</b>",
-                    f"  Haut(266):{ft(t_haut)}  Mil(265):{ft(t_mil)}  Bas(267):{ft(t_bas)}",
+                    f"  Haut:{ft(t_haut)}  Mil:{ft(t_mil)}  Bas:{ft(t_bas)}",
                     "", "💦 <b>DISPONIBILITÉ</b>",
-                    f"  V40 dispo(268): <b>{fv(v40)}</b> / {fv(v40tot)}  →  <b>{float(pct_v or 0):.0f}%</b>",
-                    "", "📅 <b>PLAGES HC BALLON (cap245-251)</b>",
+                    f"  V40 : <b>{fv(v40)}</b> / {fv(v40tot)}  →  <b>{float(pct_v or 0):.0f}%</b>",
+                    "", "📅 <b>PLAGES HC</b>",
                     f"  {hc_sched}",
-                    "", "💧 <b>QUANTITÉ PAR JOUR (cap237-243)</b>",
+                    "", "💧 <b>QUANTITÉ PAR JOUR</b>",
                 ] + qtite_lines + [
                     "", "📊 <b>CONSO</b>",
-                    f"  Index total (cap59) : <b>{idx:.3f} kWh</b>",
-                    f"  Index partiel(cap168): {float(caps.get(168,0))/1000:.3f} kWh",
+                    f"  Index : <b>{idx:.3f} kWh</b>",
                     "", "✈️ <b>ABSENCE</b>",
                     f"  {absent}  |  {dates}",
-                    "", "📋 <b>TOUTES LES CAPABILITIES</b>",
-                ] + all_caps)
+                ])
 
             # ── STATS : bilan conso HC/HP ──────────────────────────────────
             if action == "STATS":

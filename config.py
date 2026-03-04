@@ -36,3 +36,7 @@ CONFORT_VALS = {
 
 def log(msg):
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
+
+# Chat ID Telegram du propriétaire (pour alertes automatiques)
+# Récupérer avec @userinfobot sur Telegram
+ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0")) or None
