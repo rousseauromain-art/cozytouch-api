@@ -146,40 +146,51 @@ def get_salon_stats() -> str:
         cur.close(); conn.close()
 
         if not hourly:
-            return "📊 <b>SALON</b> — pas encore assez de données (reviens dans quelques jours)"
+            return ("📊 <b>STATS SALON</b>\n\n"
+                    "⚠️ Pas encore assez de données (enregistrement horaire).\n"
+                    "Reviens dans quelques jours !")
 
-        # Courbe horaire compacte : grouper par blocs de 3h
-        lines = ["📊 <b>SALON 7J</b>  <code>H=heure T=ambiance R=radiateur</code>", ""]
-        hc_zones = set(range(1, 7)) | set(range(14, 17))
+        lines = ["📊 <b>STATS SALON — 7 JOURS</b>", ""]
+
+        # Courbe horaire
+        lines.append("🕐 <b>Température ambiante par heure</b>")
+        lines.append("<code>H     T°C   Rad    N</code>")
         for h, t_amb, t_rad, n in hourly:
-            hc = "🟢" if h in hc_zones else "🔴"
-            t_r = f"{t_rad:.0f}" if t_rad else "—"
-            flag = "⬆️" if t_amb and t_amb >= 20 else ("🥶" if t_amb and t_amb < 17 else "  ")
-            lines.append(f"<code>{h:02d}h{hc} {t_amb:.1f}° R{t_r}° {flag}</code>")
+            bar = "█" * int((t_amb - 14) * 2) if t_amb else ""
+            t_r = f"{t_rad:.1f}" if t_rad else "  — "
+            hc_marker = "🟢" if (0 <= h < 7 or 14 <= h < 17) else "  "
+            lines.append(f"<code>{h:02d}h {hc_marker} {t_amb:.1f}°  rad:{t_r}°  ({n})</code>")
 
-        # HC vs HP résumé
+        # HC vs HP ambiance
         if hc_hp:
             lines.append("")
-            hc_row = hc_hp.get(True); hp_row = hc_hp.get(False)
-            t_hc = f"{hc_row[1]:.1f}°" if hc_row else "—"
-            t_hp = f"{hp_row[1]:.1f}°" if hp_row else "—"
-            lines.append(f"🟢HC={t_hc}  🔴HP={t_hp}")
+            lines.append("💡 <b>Ambiance HC vs HP</b>")
+            for hc_flag, t_amb, n in hc_hp.values():
+                lbl = "🟢 HC" if hc_flag else "🔴 HP"
+                lines.append(f"  {lbl} : <b>{t_amb:.1f}°C</b> ({n} mesures)")
 
         # Inertie fin HC → réveil
-        if inertie and inertie[2] and inertie[2] > 0 and inertie[0] and inertie[1]:
-            chute = inertie[0] - inertie[1]
-            verdict = "✅ok" if abs(chute) < 1.5 else "⚠️relance HP utile"
-            lines.append(f"🔁 06h26→07h30 : {inertie[0]:.1f}°→{inertie[1]:.1f}° ({chute:+.1f}°) {verdict}")
+        if inertie and inertie[2] and inertie[2] > 0:
+            lines.append("")
+            lines.append("🔁 <b>Inertie 06h26→07h30</b>")
+            chute = inertie[0] - inertie[1] if inertie[0] and inertie[1] else None
+            if chute is not None:
+                lines.append(f"  Fin HC (06h26) : {inertie[0]:.1f}°C")
+                lines.append(f"  Réveil (07h30) : {inertie[1]:.1f}°C")
+                lines.append(f"  Chute : <b>{chute:+.1f}°C</b> en 1h — "
+                             + ("✅ inertie suffisante" if abs(chute) < 1.5
+                                else "⚠️ relance HP recommandée"))
 
         # Télétravail
         if by_day:
-            jours_noms = ["Di","Lu","Ma","Me","Je","Ve","Sa"]
-            parts = []
+            lines.append("")
+            lines.append("📅 <b>Par jour de semaine</b>")
+            jours_noms = ["Dim","Lun","Mar","Mer","Jeu","Ven","Sam"]
             for dow, t_amb, n in by_day:
                 dow_i = int(dow)
-                ttt = "💻" if dow_i - 1 in TELETRAVAIL_JOURS else ""
-                parts.append(f"{jours_noms[dow_i]}{ttt}:{t_amb:.0f}°")
-            lines.append("📅 " + "  ".join(parts))
+                nom = jours_noms[dow_i]
+                ttt = " 💻TT" if dow_i - 1 in TELETRAVAIL_JOURS else ""
+                lines.append(f"  {nom}{ttt} : <b>{t_amb:.1f}°C</b> ({n} mesures)")
 
         return "\n".join(lines)
 
