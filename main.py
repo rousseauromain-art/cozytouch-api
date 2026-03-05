@@ -1,5 +1,6 @@
 """main.py — Bot Telegram chauffage + ballon eau chaude. v15.7"""
-import asyncio, threading, re, json, httpx
+import asyncio, threading, re, json, httpx, sys, os, sys
+from telegram.error import Conflict, NetworkError
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -15,10 +16,7 @@ from bec import (manage_bec, bec_get_index, is_heure_creuse,
 from heating import (get_current_data, apply_heating_mode, perform_record,
                      init_db, get_rad_stats, get_salon_stats)
 # ── SCHEDULER (inline) ─────────────────────────────────────────────────────
-"""scheduler.py — Gestion des programmations BEC et radiateurs avec persistance DB."""
 import psycopg2
-from datetime import datetime
-from config import DB_URL, log
 
 
 def init_scheduler_db():
@@ -596,6 +594,21 @@ class Health(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
 
 
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    """Gestionnaire global d'erreurs."""
+    err = context.error
+    if isinstance(err, Conflict):
+        # Double instance = déploiement en cours → arrêt propre de CETTE instance
+        # La nouvelle instance prend le relais
+        log("⚠️ Conflit Telegram (double instance) — arrêt propre de l'ancienne instance")
+        os.kill(os.getpid(), 15)  # SIGTERM → arrêt gracieux
+        return
+    if isinstance(err, NetworkError):
+        log(f"NetworkError (transitoire, ignoré) : {err}")
+        return
+    log(f"Erreur non gérée : {type(err).__name__}: {err}")
+
+
 def main():
     init_db()
     init_scheduler_db()
@@ -608,10 +621,10 @@ def main():
     app.add_handler(CommandHandler("bec",   cmd_bec))
     app.add_handler(CommandHandler("rads",  cmd_rads))
     app.add_handler(CommandHandler("prog",  cmd_prog))
-    # /annulerN : regex pour capturer le N
     app.add_handler(MessageHandler(
         filters.Regex(r"^/annuler\d+"), cmd_annuler
     ))
+    app.add_error_handler(error_handler)
 
     async def post_init(application):
         loop = asyncio.get_event_loop()
@@ -621,7 +634,13 @@ def main():
 
     app.post_init = post_init
     log(f"DÉMARRAGE v{VERSION}")
-    app.run_polling(drop_pending_updates=True)
+    app.run_polling(
+        drop_pending_updates=True,
+        allowed_updates=Update.ALL_TYPES,
+        read_timeout=10,
+        write_timeout=10,
+        connect_timeout=10,
+    )
 
 
 if __name__ == "__main__":
