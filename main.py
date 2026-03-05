@@ -637,9 +637,6 @@ def main():
     app.run_polling(
         drop_pending_updates=True,
         allowed_updates=Update.ALL_TYPES,
-        read_timeout=10,
-        write_timeout=10,
-        connect_timeout=10,
     )
 
 
