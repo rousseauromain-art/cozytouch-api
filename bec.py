@@ -114,45 +114,65 @@ def get_transitions_log(limit: int = 20):
     except Exception as e:
         log(f"Transitions ERR: {e}"); return None, None
 
+def save_mode_change(mode: str):
+    """Enregistre un changement de mode BEC (HOME/ABSENCE) pour la surveillance.
+    Appelé après chaque écriture réussie sur cap237-243."""
+    if not DB_URL:
+        return
+    try:
+        conn = psycopg2.connect(DB_URL)
+        cur  = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS bec_mode_log (
+                id SERIAL PRIMARY KEY,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                mode TEXT NOT NULL
+            )
+        """)
+        cur.execute("INSERT INTO bec_mode_log (mode) VALUES (%s)", (mode,))
+        conn.commit(); cur.close(); conn.close()
+        log(f"Mode BEC enregistré : {mode}")
+    except Exception as e:
+        log(f"save_mode_change ERR: {e}")
+
+
 def get_absence_days() -> int | None:
-    """Retourne le nombre de jours consécutifs en mode absence (temp_eau <= 55°C).
-    Logique :
-    - Si le dernier relevé a temp_eau > 55°C → mode maison actif → 0
-    - Si jamais eu de relevé > 55°C → historique insuffisant → None (pas d'alerte)
-    - Sinon → nombre de jours depuis le dernier relevé > 55°C
+    """Retourne le nombre de jours depuis le dernier passage en mode ABSENCE.
+    Retourne 0 si le dernier mode enregistré est HOME.
+    Retourne None si aucun historique (pas d'alerte).
     """
     if not DB_URL:
         return None
     try:
         conn = psycopg2.connect(DB_URL)
         cur  = conn.cursor()
-
-        # 1. Dernier relevé avec temp_eau renseignée
+        # Créer la table si elle n'existe pas encore
         cur.execute("""
-            SELECT temp_eau FROM bec_transitions
-            WHERE temp_eau IS NOT NULL
-            ORDER BY id DESC LIMIT 1
+            CREATE TABLE IF NOT EXISTS bec_mode_log (
+                id SERIAL PRIMARY KEY,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                mode TEXT NOT NULL
+            )
         """)
-        last = cur.fetchone()
-        if last and last[0] > 55.0:
-            cur.close(); conn.close()
-            return 0  # mode maison actif
-
-        # 2. Trouver le dernier relevé avec temp_eau > 55°C
+        conn.commit()
+        # Dernier changement de mode
         cur.execute("""
-            SELECT timestamp FROM bec_transitions
-            WHERE temp_eau IS NOT NULL AND temp_eau > 55.0
+            SELECT mode, timestamp FROM bec_mode_log
             ORDER BY id DESC LIMIT 1
         """)
         row = cur.fetchone()
         cur.close(); conn.close()
 
         if not row:
-            # Jamais eu de relevé chaud → pas assez d'historique → pas d'alerte
-            return None
+            return None  # pas d'historique → pas d'alerte
+
+        last_mode, last_ts = row
+        if last_mode == "HOME":
+            return 0  # mode maison actif → pas d'alerte
+        # ABSENCE, ABSENCE_AUTO_70 → compter les jours
 
         from datetime import datetime
-        delta = datetime.now() - row[0].replace(tzinfo=None)
+        delta = datetime.now() - last_ts.replace(tzinfo=None)
         return delta.days
     except Exception as e:
         log(f"get_absence_days ERR: {e}"); return None
@@ -435,6 +455,8 @@ async def manage_bec(action="GET"):
             caps_check = {x["capabilityId"]: x["value"] for x in r_check.json()}
             qtite_lines = decode_quantite_semaine(caps_check)
             label = "✈️ <b>BALLON ABSENCE</b>" if action == "ABSENCE" else "🏡 <b>BALLON MAISON</b>"
+            # Enregistrer le changement de mode pour la surveillance
+            save_mode_change("ABSENCE" if action == "ABSENCE" else "HOME")
             return "\n".join([
                 f"{label} — validation",
                 "", "💧 <b>QUANTITÉ PAR JOUR (valeurs lues)</b>",
