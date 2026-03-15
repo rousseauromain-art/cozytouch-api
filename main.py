@@ -1,5 +1,5 @@
 """main.py — Bot Telegram chauffage + ballon eau chaude. v15.7"""
-import asyncio, threading, re, json, httpx, sys, os, sys
+import asyncio, threading, re, json, httpx, sys, os, time, sys
 from telegram.error import Conflict, NetworkError
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -599,14 +599,8 @@ class Health(BaseHTTPRequestHandler):
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     """Gestionnaire global d'erreurs."""
     err = context.error
-    if isinstance(err, Conflict):
-        # Conflit transitoire au démarrage (Koyeb overlap) — on attend que Koyeb
-        # arrête l'ancienne instance de son côté. Ne pas se tuer soi-même.
-        log("⚠️ Conflit Telegram (déploiement en cours, attente résolution...)")
-        await asyncio.sleep(5)
-        return
-    if isinstance(err, NetworkError):
-        log(f"NetworkError (transitoire, ignoré) : {err}")
+    if isinstance(err, (Conflict, NetworkError)):
+        log(f"⚠️ {type(err).__name__} (transitoire, ignoré) : {err}")
         return
     log(f"Erreur non gérée : {type(err).__name__}: {err}")
 
@@ -618,6 +612,10 @@ def main():
         target=lambda: HTTPServer(("0.0.0.0", 8000), Health).serve_forever(),
         daemon=True
     ).start()
+    # Délai de démarrage : laisse Koyeb le temps de SIGTERM l'ancienne instance
+    # avant que cette instance commence le polling (évite le Conflict permanent)
+    log("Attente 20s pour laisser l'ancienne instance se terminer...")
+    time.sleep(20)
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("bec",   cmd_bec))
