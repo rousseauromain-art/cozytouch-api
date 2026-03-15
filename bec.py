@@ -115,28 +115,45 @@ def get_transitions_log(limit: int = 20):
         log(f"Transitions ERR: {e}"); return None, None
 
 def get_absence_days() -> int | None:
-    """Retourne le nombre de jours consécutifs où tous les jours sont à 60% (50°C).
-    Utilise les transitions BEC : si la dernière consigne vue est 50°C depuis N jours."""
+    """Retourne le nombre de jours consécutifs en mode absence (temp_eau <= 55°C).
+    Logique :
+    - Si le dernier relevé a temp_eau > 55°C → mode maison actif → 0
+    - Si jamais eu de relevé > 55°C → historique insuffisant → None (pas d'alerte)
+    - Sinon → nombre de jours depuis le dernier relevé > 55°C
+    """
     if not DB_URL:
         return None
     try:
         conn = psycopg2.connect(DB_URL)
         cur  = conn.cursor()
-        # Prend le premier relevé avec temp_eau < 52°C (proche 50°C après chauffe)
-        # et vérifie depuis combien de temps c'est le cas
+
+        # 1. Dernier relevé avec temp_eau renseignée
         cur.execute("""
-            SELECT MIN(timestamp) FROM bec_transitions
-            WHERE id >= (
-                SELECT COALESCE(MAX(id), 0) FROM bec_transitions
-                WHERE temp_eau IS NOT NULL AND temp_eau > 55.0
-            )
+            SELECT temp_eau FROM bec_transitions
+            WHERE temp_eau IS NOT NULL
+            ORDER BY id DESC LIMIT 1
         """)
-        row = cur.fetchone(); cur.close(); conn.close()
-        if row and row[0]:
-            from datetime import datetime, timezone
-            delta = datetime.now() - row[0].replace(tzinfo=None)
-            return delta.days
-        return None
+        last = cur.fetchone()
+        if last and last[0] > 55.0:
+            cur.close(); conn.close()
+            return 0  # mode maison actif
+
+        # 2. Trouver le dernier relevé avec temp_eau > 55°C
+        cur.execute("""
+            SELECT timestamp FROM bec_transitions
+            WHERE temp_eau IS NOT NULL AND temp_eau > 55.0
+            ORDER BY id DESC LIMIT 1
+        """)
+        row = cur.fetchone()
+        cur.close(); conn.close()
+
+        if not row:
+            # Jamais eu de relevé chaud → pas assez d'historique → pas d'alerte
+            return None
+
+        from datetime import datetime
+        delta = datetime.now() - row[0].replace(tzinfo=None)
+        return delta.days
     except Exception as e:
         log(f"get_absence_days ERR: {e}"); return None
 
