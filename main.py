@@ -513,6 +513,7 @@ def main():
     app.add_handler(CommandHandler("prog",   cmd_prog))
     app.add_handler(MessageHandler(
         filters.Regex(r"^/annuler\d+"), cmd_annuler))
+    app.add_handler(CallbackQueryHandler(button_handler))
     app.add_error_handler(error_handler)
 
     async def post_init(application):
