@@ -1,5 +1,5 @@
 """main.py — Bot Telegram chauffage + ballon eau chaude. v15.7"""
-import asyncio, threading, re, json, httpx, sys, os, time, sys
+import asyncio, threading, re, json, httpx, sys, os
 from telegram.error import Conflict, NetworkError
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -597,12 +597,16 @@ class Health(BaseHTTPRequestHandler):
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    """Gestionnaire global d'erreurs."""
+    """Gestionnaire global d'erreurs — log uniquement, pas d'action."""
     err = context.error
-    if isinstance(err, (Conflict, NetworkError)):
-        log(f"⚠️ {type(err).__name__} (transitoire, ignoré) : {err}")
+    if isinstance(err, Conflict):
+        # Normal pendant ~15s lors d'un redéploiement Koyeb.
+        # python-telegram-bot retente automatiquement jusqu'à résolution.
+        return  # silencieux
+    if isinstance(err, NetworkError):
+        log(f"NetworkError (transitoire) : {err}")
         return
-    log(f"Erreur non gérée : {type(err).__name__}: {err}")
+    log(f"Erreur : {type(err).__name__}: {err}")
 
 
 def main():
@@ -612,10 +616,6 @@ def main():
         target=lambda: HTTPServer(("0.0.0.0", 8000), Health).serve_forever(),
         daemon=True
     ).start()
-    # Délai de démarrage : laisse Koyeb le temps de SIGTERM l'ancienne instance
-    # avant que cette instance commence le polling (évite le Conflict permanent)
-    log("Attente 20s pour laisser l'ancienne instance se terminer...")
-    time.sleep(20)
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("bec",   cmd_bec))
