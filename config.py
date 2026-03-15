@@ -39,4 +39,5 @@ def log(msg):
 
 # Chat ID Telegram du propriétaire (pour alertes automatiques)
 # Récupérer avec @userinfobot sur Telegram
-ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0")) or None
+_admin_raw = os.getenv("ADMIN_CHAT_ID", "").strip()
+ADMIN_CHAT_ID = int(_admin_raw) if _admin_raw.isdigit() else None

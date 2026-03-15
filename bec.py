@@ -9,12 +9,7 @@ from config import ATLANTIC_API, CLIENT_BASIC, BEC_USER, BEC_PASS, DB_URL, HC_TR
 CAPS_QTITE = [237, 238, 239, 240, 241, 242, 243]
 
 def pct_to_temp(pct: int) -> float:
-    """% app → °C. 100% = 65°C (max cap252). Autres : T=(pct+90)/3."""
-    return 65.0 if pct >= 100 else round((pct + 90) / 3, 1)
-
-def temp_to_pct(t: float) -> int:
-    """°C → % app, plafonné à 100% (65°C donne 105 sans plafond)."""
-    return min(round(3 * t - 90), 100)
+    return round((pct + 90) / 3, 1)
 
 
 # ---------------------------------------------------------------------------
@@ -48,7 +43,7 @@ def minutes_until_next_transition() -> int:
 
 
 # ---------------------------------------------------------------------------
-# DB — transitions HC/HP (relevé à chaque début de HC)
+# DB — transitions HC/HP
 # ---------------------------------------------------------------------------
 def save_transition(index_kwh: float, heure_creuse: bool, temp_eau: float | None = None):
     if not DB_URL:
@@ -65,64 +60,33 @@ def save_transition(index_kwh: float, heure_creuse: bool, temp_eau: float | None
     except Exception as e:
         log(f"Transition save ERR: {e}")
 
-def get_transitions_log(limit: int = 20):
-    """Retourne les N derniers relevés avec calcul conso inter-période."""
+def get_conso_stats(jours: int = 7):
+    """Retourne (conso_hc, conso_hp, nb_periodes, chute_temp_hp_moy)."""
     if not DB_URL:
-        return None, None
+        return None
     try:
         conn = psycopg2.connect(DB_URL)
         cur  = conn.cursor()
-        # Les 20 derniers dans l'ordre chronologique
-        cur.execute("""
-            SELECT timestamp, index_kwh, heure_creuse, temp_eau FROM (
-                SELECT * FROM bec_transitions ORDER BY timestamp DESC LIMIT %s
-            ) sub ORDER BY timestamp ASC
-        """, (limit,))
-        rows = cur.fetchall()
-        cur.close(); conn.close()
-        if not rows:
-            return None, None
-
-        # Calcul conso entre chaque paire consécutive
-        entries = []
-        for i, (ts, idx, hc, temp) in enumerate(rows):
-            delta = None
-            if i > 0:
-                prev_idx = rows[i-1][1]
-                d = idx - prev_idx
-                delta = d if d >= 0 else None
-            entries.append({
-                "ts": ts, "idx": idx, "hc": hc,
-                "temp": temp, "delta": delta
-            })
-
-        # Totaux HC/HP
-        hc_k = hp_k = 0.0
-        for e in entries:
-            if e["delta"] is None:
-                continue
-            if e["hc"]:
-                hc_k += e["delta"]
-            else:
-                hp_k += e["delta"]
-
-        return entries, (hc_k, hp_k)
+        cur.execute("""SELECT timestamp, index_kwh, heure_creuse, temp_eau
+            FROM bec_transitions WHERE timestamp > NOW() - INTERVAL '%s days'
+            ORDER BY timestamp ASC""", (jours,))
+        rows = cur.fetchall(); cur.close(); conn.close()
+        if len(rows) < 2:
+            return None
+        hc_k = hp_k = 0.0; nb = 0; chutes = []
+        for i in range(len(rows) - 1):
+            _, is1, hc1, t1 = rows[i]
+            _, ie2, _,  t2 = rows[i + 1]
+            diff = ie2 - is1
+            if diff < 0: continue
+            if hc1: hc_k += diff
+            else:   hp_k += diff
+            if not hc1 and t1 is not None and t2 is not None:
+                chutes.append(t1 - t2)
+            nb += 1
+        return hc_k, hp_k, nb, (sum(chutes)/len(chutes) if chutes else None)
     except Exception as e:
-        log(f"Transitions ERR: {e}"); return None, None
-
-def reset_transitions():
-    """Vide la table bec_transitions."""
-    if not DB_URL:
-        return False
-    try:
-        conn = psycopg2.connect(DB_URL)
-        cur  = conn.cursor()
-        cur.execute("TRUNCATE TABLE bec_transitions")
-        conn.commit(); cur.close(); conn.close()
-        log("bec_transitions réinitialisée")
-        return True
-    except Exception as e:
-        log(f"Reset ERR: {e}"); return False
+        log(f"Conso stats ERR: {e}"); return None
 
 
 # ---------------------------------------------------------------------------
@@ -136,7 +100,6 @@ def find_water_heater(devices: list) -> dict | None:
     return devices[0] if len(devices) == 1 else None
 
 def decode_hc_schedule(raw) -> str:
-    """Décode cap245-251 : plages HC en minutes depuis minuit."""
     try:
         slots = json.loads(str(raw)) if isinstance(raw, str) else raw
         plages = [f"{s[0]//60:02d}h{s[0]%60:02d}→{s[1]//60:02d}h{s[1]%60:02d}"
@@ -146,7 +109,6 @@ def decode_hc_schedule(raw) -> str:
         return str(raw)
 
 def decode_quantite_semaine(caps: dict) -> list[str]:
-    """Décode cap237-243 → % quantité par jour (formule : % = 3T-90)."""
     jours = ["Lun","Mar","Mer","Jeu","Ven","Sam","Dim"]
     lines = []
     for i, cap_id in enumerate(CAPS_QTITE):
@@ -156,7 +118,7 @@ def decode_quantite_semaine(caps: dict) -> list[str]:
         try:
             slots = json.loads(str(val)) if isinstance(val, str) else val
             t = float(slots[0][1]) if isinstance(slots, list) else float(val)
-            pct = min(round(3 * t - 90), 100)  # 65°C → 100% (plafonné)
+            pct = round(3 * t - 90)
             lines.append(f"  {jours[i]}: <b>{pct}%</b> ({t:.0f}°C)")
         except:
             lines.append(f"  {jours[i]}: {val}")
@@ -193,7 +155,6 @@ async def bec_get_index() -> tuple[float | None, float | None]:
         if r2.status_code != 200: return None, None
         caps = {x["capabilityId"]: x["value"] for x in r2.json()}
         idx  = float(caps.get(59, 0)) / 1000
-        # cap266 = haut du ballon, sinon cap265 = milieu
         t_raw = caps.get(266, caps.get(265))
         temp  = float(t_raw) if t_raw is not None else None
         return idx, temp
@@ -204,31 +165,19 @@ async def bec_get_index() -> tuple[float | None, float | None]:
 # ---------------------------------------------------------------------------
 async def write_capability(c: httpx.AsyncClient, h: dict, dev_id: int,
                            cap_id: int, value) -> bool:
-    """Écrit une cap avec retry x2 et poll état jusqu'à 15s."""
-    for attempt in range(2):
-        try:
-            r = await c.post(f"{ATLANTIC_API}/magellan/executions/writecapability",
-                             json={"capabilityId": cap_id, "deviceId": dev_id, "value": str(value)},
-                             headers=h, timeout=15)
-            if r.status_code != 201:
-                log(f"writecap {cap_id} attempt {attempt+1} → HTTP {r.status_code}")
-                if attempt == 0:
-                    await asyncio.sleep(3)
-                continue
-            exec_id = r.json()
-            for _ in range(15):  # poll jusqu'à 30s
-                await asyncio.sleep(2)
-                r2 = await c.get(f"{ATLANTIC_API}/magellan/executions/{exec_id}",
-                                 headers=h, timeout=10)
-                state = r2.json().get("state", 0) if r2.status_code == 200 else 0
-                if state == 3:
-                    return True
-                if state not in (1, 2):
-                    break
-        except Exception as e:
-            log(f"writecap {cap_id} attempt {attempt+1} exception: {e}")
-            if attempt == 0:
-                await asyncio.sleep(3)
+    r = await c.post(f"{ATLANTIC_API}/magellan/executions/writecapability",
+                     json={"capabilityId": cap_id, "deviceId": dev_id, "value": str(value)},
+                     headers=h, timeout=15)
+    if r.status_code != 201:
+        log(f"writecap {cap_id}={value} → HTTP {r.status_code}")
+        return False
+    exec_id = r.json()
+    for _ in range(8):
+        await asyncio.sleep(1)
+        r2 = await c.get(f"{ATLANTIC_API}/magellan/executions/{exec_id}", headers=h, timeout=10)
+        state = r2.json().get("state", 0) if r2.status_code == 200 else 0
+        if state == 3: return True
+        if state not in (1, 2): break
     return False
 
 
@@ -255,7 +204,7 @@ async def manage_bec(action="GET"):
                 return f"❓ Non trouvé. Devices: {[d.get('name') for d in setup.get('devices',[])]}"
             dev_id = dev.get("deviceId")
 
-            # ── GET : état complet ─────────────────────────────────────────
+            # ── GET ─────────────────────────────────────────────────────────
             if action == "GET":
                 r2   = await c.get(f"{ATLANTIC_API}/magellan/capabilities/?deviceId={dev_id}", headers=h)
                 caps = {x["capabilityId"]: x["value"] for x in r2.json()}
@@ -293,105 +242,70 @@ async def manage_bec(action="GET"):
                 hc_sched = decode_hc_schedule(caps.get(245))
                 qtite_lines = decode_quantite_semaine(caps)
 
-                # Toutes les caps triées
-                all_caps = []
-                for cid in sorted(caps.keys()):
-                    v = caps[cid]
-                    if isinstance(v, str) and v.startswith("[["):
-                        vs = v.replace(" ", "")[:60]
-                    else:
-                        try:   vs = f"{float(v):.3f}".rstrip('0').rstrip('.')
-                        except: vs = str(v)[:60]
-                    all_caps.append(f"  cap{cid} = {vs}")
-
                 return "\n".join([
-                    f"💧 <b>{dev.get('name','Chauffe-eau')}</b> (id={dev_id})",
+                    f"💧 <b>{dev.get('name','Chauffe-eau')}</b>",
                     "", "⚡ <b>ÉTAT</b>",
                     f"  {chauffe}",
                     f"  Consigne : <b>{temp_c:.0f}°C</b>  Mode : <b>{mode}</b>",
                     f"  Résistance : {resist}  |  Boost : {boost}",
                     f"  {get_hc_label()}",
                     "", "🌡️ <b>TEMPÉRATURES EAU</b>",
-                    f"  Haut(266):{ft(t_haut)}  Mil(265):{ft(t_mil)}  Bas(267):{ft(t_bas)}",
+                    f"  Haut:{ft(t_haut)}  Mil:{ft(t_mil)}  Bas:{ft(t_bas)}",
                     "", "💦 <b>DISPONIBILITÉ</b>",
-                    f"  V40 dispo(268): <b>{fv(v40)}</b> / {fv(v40tot)}  →  <b>{float(pct_v or 0):.0f}%</b>",
-                    "", "📅 <b>PLAGES HC BALLON (cap245-251)</b>",
+                    f"  V40 : <b>{fv(v40)}</b> / {fv(v40tot)}  →  <b>{float(pct_v or 0):.0f}%</b>",
+                    "", "📅 <b>PLAGES HC</b>",
                     f"  {hc_sched}",
-                    "", "💧 <b>QUANTITÉ PAR JOUR (cap237-243)</b>",
+                    "", "💧 <b>QUANTITÉ PAR JOUR</b>",
                 ] + qtite_lines + [
                     "", "📊 <b>CONSO</b>",
-                    f"  Index total (cap59) : <b>{idx:.3f} kWh</b>",
-                    f"  Index partiel(cap168): {float(caps.get(168,0))/1000:.3f} kWh",
+                    f"  Index : <b>{idx:.3f} kWh</b>",
                     "", "✈️ <b>ABSENCE</b>",
                     f"  {absent}  |  {dates}",
-                    "", "📋 <b>TOUTES LES CAPABILITIES</b>",
-                ] + all_caps)
+                ])
 
-            # ── STATS : bilan conso HC/HP ──────────────────────────────────
+            # ── STATS ────────────────────────────────────────────────────────
             if action == "STATS":
-                entries, totaux = get_transitions_log(20)
-                if not entries:
-                    return "⚠️ Aucun relevé en base. Les relevés sont pris à chaque transition HC/HP (4×/jour)."
-
-                lines = ["📋 <b>20 DERNIERS RELEVÉS BEC</b>", ""]
-                # En-tête
-                lines.append("<code>Date     Heure  HC/HP  Index kWh  ΔkWh   T°C</code>")
-                lines.append("<code>─────────────────────────────────────────────</code>")
-
-                for e in entries:
-                    ts    = e["ts"]
-                    hc_lbl = "🟢HC" if e["hc"] else "🔴HP"
-                    idx   = f"{e['idx']:.3f}"
-                    delta = f"+{e['delta']:.3f}" if e["delta"] is not None else "  — "
-                    temp  = f"{e['temp']:.1f}°C" if e["temp"] is not None else " —  "
-                    date  = ts.strftime("%d/%m")
-                    heure = ts.strftime("%H:%M")
-                    lines.append(f"<code>{date} {heure}  {hc_lbl}  {idx}  {delta}  {temp}</code>")
-
-                if totaux:
-                    hc_k, hp_k = totaux
-                    tot = hc_k + hp_k
-                    pct = (hc_k / tot * 100) if tot > 0 else 0
-                    lines += [
-                        "",
-                        f"🟢 HC total : <b>{hc_k:.3f} kWh</b> ({pct:.0f}%)",
-                        f"🔴 HP total : <b>{hp_k:.3f} kWh</b> ({100-pct:.0f}%)",
-                        f"⚡ Total    : <b>{tot:.3f} kWh</b>",
-                    ]
+                s = get_conso_stats(7)
+                if not s:
+                    return "⚠️ Pas encore assez de données (4 relevés/jour aux transitions)."
+                hc_k, hp_k, nb, chute = s
+                tot = hc_k + hp_k
+                pct = (hc_k / tot * 100) if tot > 0 else 0
+                lines = [
+                    "📊 <b>CONSO BALLON — 7 JOURS</b>",
+                    f"🟢 Heures Creuses : <b>{hc_k:.2f} kWh</b> ({pct:.0f}%)",
+                    f"🔴 Heures Pleines : <b>{hp_k:.2f} kWh</b> ({100-pct:.0f}%)",
+                    f"⚡ Total : <b>{tot:.2f} kWh</b>  |  <i>{nb} périodes</i>",
+                ]
+                if chute is not None:
+                    lines.append(f"🌡️ Chute temp. HP : <b>−{chute:.1f}°C</b> en moyenne")
                 return "\n".join(lines)
 
-            # ── ABSENCE : 60% tous les jours (sans déclencher le mode absence Atlantic)
-            # ── HOME    : 80% semaine (Lun-Ven) + 100% weekend (Sam-Dim)
-            # Pas d'appel PUT setup → pas de procédure de réchauffage forcé Atlantic
+            # ── ABSENCE / HOME ───────────────────────────────────────────────
             jours = ["Lun","Mar","Mer","Jeu","Ven","Sam","Dim"]
 
             if action == "ABSENCE":
-                # 60% sur les 7 jours → T = (60+90)/3 = 50°C
                 cibles = {cap_id: 60 for cap_id in CAPS_QTITE}
             elif action == "HOME":
-                # Lun-Ven (cap237-241) = 80% → T = (80+90)/3 = 56.7°C
-                # Sam-Dim (cap242-243) = 100% → T = (100+90)/3 = 63.3°C
                 cibles = {}
                 for i, cap_id in enumerate(CAPS_QTITE):
-                    cibles[cap_id] = 100 if i >= 5 else 80  # i=5→Sam, i=6→Dim
+                    cibles[cap_id] = 100 if i >= 5 else 80
             else:
                 return "❓ Action inconnue"
 
-            # Écriture parallèle des 7 jours → réduit le temps de ~90s à ~20s
             async def write_one(i, cap_id):
-                pct = cibles[cap_id]
-                T   = pct_to_temp(pct)
+                pct_val = cibles[cap_id]
+                T   = pct_to_temp(pct_val)
                 slot_val = json.dumps([[0, T], [0, 0], [0, 0], [0, 0]])
                 ok = await write_capability(c, h, dev_id, cap_id, slot_val)
-                log(f"BEC write cap{cap_id} ({jours[i]})={pct}% ({T}°C) → {'OK' if ok else 'ERR'}")
+                log(f"BEC write cap{cap_id} ({jours[i]})={pct_val}% ({T}°C) → {'OK' if ok else 'ERR'}")
                 return ok
 
             ok_list = await asyncio.gather(
                 *[write_one(i, cap_id) for i, cap_id in enumerate(CAPS_QTITE)]
             )
-            results = ["✓" if ok else "✗" for ok in ok_list]
 
-            # Validation : relecture des caps après écriture
+            # Validation : relecture après écriture
             await asyncio.sleep(3)
             r_check = await c.get(f"{ATLANTIC_API}/magellan/capabilities/?deviceId={dev_id}",
                                   headers=h)
