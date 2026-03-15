@@ -83,29 +83,25 @@ def get_transitions_log(limit: int = 20):
         if not rows:
             return None, None
 
-        # Calcul conso : delta attribué au statut du DEBUT de période (ligne i-1)
-        # Ex: 00h56(HC)→06h26(HP) : +1.514kWh consommés PENDANT HC, pas HP
+        # Calcul conso entre chaque paire consécutive
         entries = []
         for i, (ts, idx, hc, temp) in enumerate(rows):
             delta = None
-            delta_hc = hc  # statut par défaut
             if i > 0:
                 prev_idx = rows[i-1][1]
-                prev_hc  = rows[i-1][2]  # statut au DEBUT de la période
                 d = idx - prev_idx
                 delta = d if d >= 0 else None
-                delta_hc = prev_hc       # conso = période précédente
             entries.append({
                 "ts": ts, "idx": idx, "hc": hc,
-                "temp": temp, "delta": delta, "delta_hc": delta_hc
+                "temp": temp, "delta": delta
             })
 
-        # Totaux basés sur le statut du début de période
+        # Totaux HC/HP
         hc_k = hp_k = 0.0
         for e in entries:
             if e["delta"] is None:
                 continue
-            if e["delta_hc"]:
+            if e["hc"]:
                 hc_k += e["delta"]
             else:
                 hp_k += e["delta"]
@@ -113,69 +109,6 @@ def get_transitions_log(limit: int = 20):
         return entries, (hc_k, hp_k)
     except Exception as e:
         log(f"Transitions ERR: {e}"); return None, None
-
-def save_mode_change(mode: str):
-    """Enregistre un changement de mode BEC (HOME/ABSENCE) pour la surveillance.
-    Appelé après chaque écriture réussie sur cap237-243."""
-    if not DB_URL:
-        return
-    try:
-        conn = psycopg2.connect(DB_URL)
-        cur  = conn.cursor()
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS bec_mode_log (
-                id SERIAL PRIMARY KEY,
-                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                mode TEXT NOT NULL
-            )
-        """)
-        cur.execute("INSERT INTO bec_mode_log (mode) VALUES (%s)", (mode,))
-        conn.commit(); cur.close(); conn.close()
-        log(f"Mode BEC enregistré : {mode}")
-    except Exception as e:
-        log(f"save_mode_change ERR: {e}")
-
-
-def get_absence_days() -> int | None:
-    """Retourne le nombre de jours depuis le dernier passage en mode ABSENCE.
-    Retourne 0 si le dernier mode enregistré est HOME.
-    Retourne None si aucun historique (pas d'alerte).
-    """
-    if not DB_URL:
-        return None
-    try:
-        conn = psycopg2.connect(DB_URL)
-        cur  = conn.cursor()
-        # Créer la table si elle n'existe pas encore
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS bec_mode_log (
-                id SERIAL PRIMARY KEY,
-                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                mode TEXT NOT NULL
-            )
-        """)
-        conn.commit()
-        # Dernier changement de mode
-        cur.execute("""
-            SELECT mode, timestamp FROM bec_mode_log
-            ORDER BY id DESC LIMIT 1
-        """)
-        row = cur.fetchone()
-        cur.close(); conn.close()
-
-        if not row:
-            return None  # pas d'historique → pas d'alerte
-
-        last_mode, last_ts = row
-        if last_mode == "HOME":
-            return 0  # mode maison actif → pas d'alerte
-        # ABSENCE, ABSENCE_AUTO_70 → compter les jours
-
-        from datetime import datetime
-        delta = datetime.now() - last_ts.replace(tzinfo=None)
-        return delta.days
-    except Exception as e:
-        log(f"get_absence_days ERR: {e}"); return None
 
 def reset_transitions():
     """Vide la table bec_transitions."""
@@ -360,26 +293,39 @@ async def manage_bec(action="GET"):
                 hc_sched = decode_hc_schedule(caps.get(245))
                 qtite_lines = decode_quantite_semaine(caps)
 
+                # Toutes les caps triées
+                all_caps = []
+                for cid in sorted(caps.keys()):
+                    v = caps[cid]
+                    if isinstance(v, str) and v.startswith("[["):
+                        vs = v.replace(" ", "")[:60]
+                    else:
+                        try:   vs = f"{float(v):.3f}".rstrip('0').rstrip('.')
+                        except: vs = str(v)[:60]
+                    all_caps.append(f"  cap{cid} = {vs}")
+
                 return "\n".join([
-                    f"💧 <b>{dev.get('name','Chauffe-eau')}</b>",
+                    f"💧 <b>{dev.get('name','Chauffe-eau')}</b> (id={dev_id})",
                     "", "⚡ <b>ÉTAT</b>",
                     f"  {chauffe}",
                     f"  Consigne : <b>{temp_c:.0f}°C</b>  Mode : <b>{mode}</b>",
                     f"  Résistance : {resist}  |  Boost : {boost}",
                     f"  {get_hc_label()}",
                     "", "🌡️ <b>TEMPÉRATURES EAU</b>",
-                    f"  Haut:{ft(t_haut)}  Mil:{ft(t_mil)}  Bas:{ft(t_bas)}",
+                    f"  Haut(266):{ft(t_haut)}  Mil(265):{ft(t_mil)}  Bas(267):{ft(t_bas)}",
                     "", "💦 <b>DISPONIBILITÉ</b>",
-                    f"  V40 : <b>{fv(v40)}</b> / {fv(v40tot)}  →  <b>{float(pct_v or 0):.0f}%</b>",
-                    "", "📅 <b>PLAGES HC</b>",
+                    f"  V40 dispo(268): <b>{fv(v40)}</b> / {fv(v40tot)}  →  <b>{float(pct_v or 0):.0f}%</b>",
+                    "", "📅 <b>PLAGES HC BALLON (cap245-251)</b>",
                     f"  {hc_sched}",
-                    "", "💧 <b>QUANTITÉ PAR JOUR</b>",
+                    "", "💧 <b>QUANTITÉ PAR JOUR (cap237-243)</b>",
                 ] + qtite_lines + [
                     "", "📊 <b>CONSO</b>",
-                    f"  Index : <b>{idx:.3f} kWh</b>",
+                    f"  Index total (cap59) : <b>{idx:.3f} kWh</b>",
+                    f"  Index partiel(cap168): {float(caps.get(168,0))/1000:.3f} kWh",
                     "", "✈️ <b>ABSENCE</b>",
                     f"  {absent}  |  {dates}",
-                ])
+                    "", "📋 <b>TOUTES LES CAPABILITIES</b>",
+                ] + all_caps)
 
             # ── STATS : bilan conso HC/HP ──────────────────────────────────
             if action == "STATS":
@@ -388,21 +334,18 @@ async def manage_bec(action="GET"):
                     return "⚠️ Aucun relevé en base. Les relevés sont pris à chaque transition HC/HP (4×/jour)."
 
                 lines = ["📋 <b>20 DERNIERS RELEVÉS BEC</b>", ""]
-                lines.append("<code>Date  Heure  État   Index    Δ(HC/HP période)  T°C</code>")
-                lines.append("<code>──────────────────────────────────────────────────</code>")
+                # En-tête
+                lines.append("<code>Date     Heure  HC/HP  Index kWh  ΔkWh   T°C</code>")
+                lines.append("<code>─────────────────────────────────────────────</code>")
 
                 for e in entries:
-                    ts     = e["ts"]
+                    ts    = e["ts"]
                     hc_lbl = "🟢HC" if e["hc"] else "🔴HP"
-                    idx    = f"{e['idx']:.3f}"
-                    temp   = f"{e['temp']:.1f}°C" if e["temp"] is not None else "  — "
-                    date   = ts.strftime("%d/%m")
-                    heure  = ts.strftime("%H:%M")
-                    if e["delta"] is not None:
-                        d_lbl = "🟢" if e["delta_hc"] else "🔴"
-                        delta = f"{d_lbl}+{e['delta']:.3f}"
-                    else:
-                        delta = "          —    "
+                    idx   = f"{e['idx']:.3f}"
+                    delta = f"+{e['delta']:.3f}" if e["delta"] is not None else "  — "
+                    temp  = f"{e['temp']:.1f}°C" if e["temp"] is not None else " —  "
+                    date  = ts.strftime("%d/%m")
+                    heure = ts.strftime("%H:%M")
                     lines.append(f"<code>{date} {heure}  {hc_lbl}  {idx}  {delta}  {temp}</code>")
 
                 if totaux:
@@ -455,8 +398,6 @@ async def manage_bec(action="GET"):
             caps_check = {x["capabilityId"]: x["value"] for x in r_check.json()}
             qtite_lines = decode_quantite_semaine(caps_check)
             label = "✈️ <b>BALLON ABSENCE</b>" if action == "ABSENCE" else "🏡 <b>BALLON MAISON</b>"
-            # Enregistrer le changement de mode pour la surveillance
-            save_mode_change("ABSENCE" if action == "ABSENCE" else "HOME")
             return "\n".join([
                 f"{label} — validation",
                 "", "💧 <b>QUANTITÉ PAR JOUR (valeurs lues)</b>",
