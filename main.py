@@ -1,13 +1,14 @@
 """main.py — Bot Telegram chauffage + ballon eau chaude. v15.7"""
 import asyncio, threading, re, json, httpx, sys, os
-from telegram.error import Conflict, NetworkError
+import psycopg2
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (Application, CommandHandler, CallbackQueryHandler,
                            MessageHandler, filters, ContextTypes)
+from telegram.error import Conflict, NetworkError
 
-from config import TOKEN, DB_URL, VERSION, log
+from config import TOKEN, DB_URL, VERSION, log, ADMIN_CHAT_ID
 from bec import (manage_bec, bec_get_index, is_heure_creuse,
                  get_hc_label, minutes_until_next_transition, save_transition,
                  reset_transitions, get_absence_days, save_mode_change,
@@ -15,8 +16,9 @@ from bec import (manage_bec, bec_get_index, is_heure_creuse,
                  CAPS_QTITE, ATLANTIC_API, find_water_heater)
 from heating import (get_current_data, apply_heating_mode, perform_record,
                      init_db, get_rad_stats, get_salon_stats)
-# ── SCHEDULER (inline) ─────────────────────────────────────────────────────
-import psycopg2
+
+
+# ── SCHEDULER (inline) ──────────────────────────────────────────────────
 
 
 def init_scheduler_db():
@@ -133,10 +135,6 @@ def get_pending_summary(chat_id: int | None = None) -> str:
     return "\n".join(lines)
 # ────────────────────────────────────────────────────────────────────────────
 
-
-# ---------------------------------------------------------------------------
-# CLAVIER
-# ---------------------------------------------------------------------------
 def get_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🏠 MAISON",         callback_data="HOME"),
@@ -551,7 +549,6 @@ async def background_bec_surveillance(app):
                             )
                             # Enregistrer l'escalade auto en base
                             save_mode_change("ABSENCE_AUTO_70")
-                            from config import ADMIN_CHAT_ID
                             if ADMIN_CHAT_ID:
                                 await app.bot.send_message(
                                     ADMIN_CHAT_ID,
