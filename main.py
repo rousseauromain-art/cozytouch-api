@@ -3,24 +3,25 @@ import asyncio, threading, re, json, httpx, sys, os
 import psycopg2
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
+
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (Application, CommandHandler, CallbackQueryHandler,
                            MessageHandler, filters, ContextTypes)
 from telegram.error import Conflict, NetworkError
 
-from config import TOKEN, DB_URL, VERSION, log, ADMIN_CHAT_ID
+from config import TOKEN, DB_URL, VERSION, log, ADMIN_CHAT_ID, ATLANTIC_API
 from bec import (manage_bec, bec_get_index, is_heure_creuse,
                  get_hc_label, minutes_until_next_transition, save_transition,
                  reset_transitions, get_absence_days, save_mode_change,
                  pct_to_temp, write_capability, bec_authenticate,
-                 CAPS_QTITE, ATLANTIC_API, find_water_heater)
+                 find_water_heater, CAPS_QTITE)
 from heating import (get_current_data, apply_heating_mode, perform_record,
-                     init_db, get_rad_stats, get_salon_stats)
+                     init_db, get_salon_stats)
 
 
-# ── SCHEDULER (inline) ──────────────────────────────────────────────────
-
-
+# ---------------------------------------------------------------------------
+# SCHEDULER (inline)
+# ---------------------------------------------------------------------------
 def init_scheduler_db():
     if not DB_URL:
         return
@@ -32,11 +33,16 @@ def init_scheduler_db():
                 id SERIAL PRIMARY KEY,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 target_dt  TIMESTAMP NOT NULL,
-                action     TEXT NOT NULL,   -- 'BEC_HOME', 'BEC_ABSENCE', 'RADS_HOME', 'RADS_ABSENCE'
-                label      TEXT,            -- description libre ex: 'Retour jeudi soir'
+                action     TEXT NOT NULL,
+                label      TEXT,
                 chat_id    BIGINT NOT NULL,
                 done       BOOLEAN DEFAULT FALSE,
                 done_at    TIMESTAMP
+            );
+            CREATE TABLE IF NOT EXISTS bec_mode_log (
+                id SERIAL PRIMARY KEY,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                mode TEXT NOT NULL
             );
         """)
         conn.commit(); cur.close(); conn.close()
@@ -44,18 +50,16 @@ def init_scheduler_db():
         log(f"Scheduler DB init ERR: {e}")
 
 
-def save_scheduled(target_dt: datetime, action: str, label: str, chat_id: int) -> int | None:
-    """Sauvegarde une programmation et retourne son ID."""
+def save_scheduled(target_dt, action, label, chat_id):
     if not DB_URL:
         return None
     try:
         conn = psycopg2.connect(DB_URL)
         cur  = conn.cursor()
         cur.execute(
-            "INSERT INTO scheduled_actions (target_dt, action, label, chat_id)"
+            "INSERT INTO scheduled_actions (target_dt,action,label,chat_id)"
             " VALUES (%s,%s,%s,%s) RETURNING id",
-            (target_dt, action, label, chat_id)
-        )
+            (target_dt, action, label, chat_id))
         row_id = cur.fetchone()[0]
         conn.commit(); cur.close(); conn.close()
         return row_id
@@ -63,32 +67,28 @@ def save_scheduled(target_dt: datetime, action: str, label: str, chat_id: int) -
         log(f"save_scheduled ERR: {e}"); return None
 
 
-def mark_done(sched_id: int):
+def mark_done(sched_id):
     if not DB_URL:
         return
     try:
         conn = psycopg2.connect(DB_URL)
         cur  = conn.cursor()
-        cur.execute(
-            "UPDATE scheduled_actions SET done=TRUE, done_at=NOW() WHERE id=%s",
-            (sched_id,)
-        )
+        cur.execute("UPDATE scheduled_actions SET done=TRUE,done_at=NOW()"
+                    " WHERE id=%s", (sched_id,))
         conn.commit(); cur.close(); conn.close()
     except Exception as e:
         log(f"mark_done ERR: {e}")
 
 
-def cancel_scheduled(sched_id: int, chat_id: int) -> bool:
-    """Annule une programmation si elle appartient au bon chat."""
+def cancel_scheduled(sched_id, chat_id):
     if not DB_URL:
         return False
     try:
         conn = psycopg2.connect(DB_URL)
         cur  = conn.cursor()
-        cur.execute(
-            "DELETE FROM scheduled_actions WHERE id=%s AND chat_id=%s AND done=FALSE",
-            (sched_id, chat_id)
-        )
+        cur.execute("DELETE FROM scheduled_actions"
+                    " WHERE id=%s AND chat_id=%s AND done=FALSE",
+                    (sched_id, chat_id))
         deleted = cur.rowcount > 0
         conn.commit(); cur.close(); conn.close()
         return deleted
@@ -96,16 +96,15 @@ def cancel_scheduled(sched_id: int, chat_id: int) -> bool:
         log(f"cancel_scheduled ERR: {e}"); return False
 
 
-def get_pending(chat_id: int | None = None) -> list[dict]:
-    """Retourne les programmations en attente (non exécutées, futures)."""
+def get_pending(chat_id=None):
     if not DB_URL:
         return []
     try:
         conn = psycopg2.connect(DB_URL)
         cur  = conn.cursor()
-        q = """SELECT id, target_dt, action, label, chat_id
-               FROM scheduled_actions
-               WHERE done=FALSE AND target_dt > NOW()"""
+        q = ("SELECT id,target_dt,action,label,chat_id"
+             " FROM scheduled_actions"
+             " WHERE done=FALSE AND target_dt > NOW()")
         params = []
         if chat_id:
             q += " AND chat_id=%s"
@@ -119,22 +118,24 @@ def get_pending(chat_id: int | None = None) -> list[dict]:
         log(f"get_pending ERR: {e}"); return []
 
 
-def get_pending_summary(chat_id: int | None = None) -> str:
-    """Résumé court des programmations actives pour affichage dans ÉTAT."""
+def get_pending_summary(chat_id=None):
     items = get_pending(chat_id)
     if not items:
         return ""
     icons = {"BEC_HOME": "🏡💧", "BEC_ABSENCE": "✈️💧",
              "RADS_HOME": "🏡🌡️", "RADS_ABSENCE": "❄️🌡️"}
     lines = []
-    for it in items[:3]:  # max 3 dans le résumé
+    for it in items[:3]:
         dt  = it["target_dt"].strftime("%d/%m %Hh%M")
         ico = icons.get(it["action"], "⏰")
         lbl = f" — {it['label']}" if it["label"] else ""
         lines.append(f"  {ico} {dt}{lbl} [/annuler{it['id']}]")
     return "\n".join(lines)
-# ────────────────────────────────────────────────────────────────────────────
 
+
+# ---------------------------------------------------------------------------
+# CLAVIER
+# ---------------------------------------------------------------------------
 def get_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🏠 MAISON",         callback_data="HOME"),
@@ -152,36 +153,21 @@ def get_keyboard():
 # ---------------------------------------------------------------------------
 # PARSER DATE/HEURE
 # ---------------------------------------------------------------------------
-def parse_datetime_arg(args: list[str]) -> tuple[datetime | None, str, str]:
-    """Parse les arguments d'une commande programmée.
-    Formats acceptés :
-      /bec now                         → immédiat
-      /bec 14h                         → aujourd'hui 14h00
-      /bec 14h30                       → aujourd'hui 14h30
-      /bec jeu 14h                     → prochain jeudi 14h
-      /bec 06/03 14h                   → le 06 mars à 14h
-      /bec 06/03 14h Retour weekend    → avec label
-    Retourne : (datetime_cible, label, erreur)
-    """
+def parse_datetime_arg(args):
     if not args:
         return None, "", "no_args"
-
     text = " ".join(args).strip()
-
     if text.lower() == "now":
         return datetime.now(), "maintenant", ""
 
     jours_map = {
         "lun": 0, "mar": 1, "mer": 2, "jeu": 3, "ven": 4, "sam": 5, "dim": 6,
         "lundi": 0, "mardi": 1, "mercredi": 2, "jeudi": 3, "vendredi": 4,
-        "samedi": 5, "dimanche": 6
+        "samedi": 5, "dimanche": 6,
     }
-
-    # Extraire date optionnelle
     date_part = None
     remaining = text
 
-    # Format JJ/MM
     m_date = re.match(r"(\d{1,2})/(\d{1,2})\s*", text, re.I)
     if m_date:
         day, month = int(m_date.group(1)), int(m_date.group(2))
@@ -193,119 +179,82 @@ def parse_datetime_arg(args: list[str]) -> tuple[datetime | None, str, str]:
         except ValueError:
             return None, "", "date invalide"
         remaining = text[m_date.end():]
-
-    # Format jour de semaine
-    elif any(text.lower().startswith(j) for j in jours_map):
-        m_jour = re.match(r"(lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche|"
-                          r"lun|mar|mer|jeu|ven|sam|dim)\s*", text, re.I)
+    else:
+        m_jour = re.match(
+            r"(lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche"
+            r"|lun|mar|mer|jeu|ven|sam|dim)\s*", text, re.I)
         if m_jour:
             target_dow = jours_map[m_jour.group(1).lower()]
-            now = datetime.now()
-            diff = (target_dow - now.weekday()) % 7
-            if diff == 0:
-                diff = 7  # prochain si même jour
+            now  = datetime.now()
+            diff = (target_dow - now.weekday()) % 7 or 7
             date_part = (now + timedelta(days=diff)).replace(
                 hour=0, minute=0, second=0, microsecond=0)
             remaining = text[m_jour.end():]
 
-    # Extraire heure (obligatoire)
     m_heure = re.match(r"(\d{1,2})h(\d{0,2})\s*", remaining.strip(), re.I)
     if not m_heure:
         return None, "", "heure manquante (ex: 14h ou 14h30)"
-
     h, mn = int(m_heure.group(1)), int(m_heure.group(2) or 0)
     if not (0 <= h <= 23 and 0 <= mn <= 59):
         return None, "", "heure invalide"
 
-    label = remaining[m_heure.end():].strip() or ""
-
+    label = remaining[m_heure.end():].strip()
     if date_part:
         target = date_part.replace(hour=h, minute=mn, second=0, microsecond=0)
     else:
-        now = datetime.now()
+        now    = datetime.now()
         target = now.replace(hour=h, minute=mn, second=0, microsecond=0)
         if target <= now:
             target += timedelta(days=1)
-
     return target, label, ""
 
 
 # ---------------------------------------------------------------------------
-# COMMANDES /start /bec /rads /annuler /prog
+# COMMANDES
 # ---------------------------------------------------------------------------
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(f"🚀 Cozybot v{VERSION}", reply_markup=get_keyboard())
+    await update.message.reply_text(f"🚀 Cozybot v{VERSION}",
+                                    reply_markup=get_keyboard())
 
 
-HELP_BEC = (
-    "💧 <b>/bec</b> — Programme le ballon eau chaude\n\n"
-    "<b>Modes disponibles :</b>\n"
-    "  maison  → 80% semaine, 100% weekend (défaut si omis)\n"
-    "  absence → 60% tous les jours\n\n"
-    "<b>Formats date/heure :</b>\n"
-    "  /bec maison now           → immédiatement\n"
-    "  /bec maison 14h           → aujourd'hui à 14h\n"
-    "  /bec maison jeu 18h       → jeudi prochain 18h\n"
-    "  /bec maison 06/03 20h     → le 06/03 à 20h\n"
-    "  /bec absence dim 10h Départ → avec étiquette\n\n"
-    "/prog — voir toutes les programmations\n"
-    "/annuler42 — annuler la #42"
-)
-
-HELP_RADS = (
-    "🌡️ <b>/rads</b> — Programme les radiateurs\n\n"
-    "<b>Modes disponibles :</b>\n"
-    "  maison  → températures confort (défaut si omis)\n"
-    "  absence → températures éco\n\n"
-    "<b>Formats date/heure :</b>\n"
-    "  /rads maison now          → immédiatement\n"
-    "  /rads maison 7h           → aujourd'hui à 7h\n"
-    "  /rads maison jeu 17h      → jeudi prochain 17h\n"
-    "  /rads absence dim 10h Départ\n\n"
-    "/prog — voir toutes les programmations\n"
-    "/annuler42 — annuler la #42"
-)
-
-
-async def _schedule_action(update: Update, context: ContextTypes.DEFAULT_TYPE,
-                           action: str):
-    """Handler commun pour /bec et /rads."""
-    chat_id  = update.effective_chat.id
-    args     = context.args or []
-    icon_map = {"BEC_HOME": "💧🏡", "BEC_ABSENCE": "💧✈️", "RADS_HOME": "🌡️🏡", "RADS_ABSENCE": "❄️🌡️"}
-    icon     = icon_map.get(action, "⏰")
+async def _schedule_action(update, context, action):
+    chat_id = update.effective_chat.id
+    args    = context.args or []
+    icons   = {"BEC_HOME": "💧🏡", "BEC_ABSENCE": "💧✈️",
+               "RADS_HOME": "🌡️🏡", "RADS_ABSENCE": "❄️🌡️"}
+    icon    = icons.get(action, "⏰")
 
     if not args:
-        help_txt = HELP_BEC if action == "BEC_HOME" else HELP_RADS
+        help_txt = (
+            "💧 <b>/bec [maison|absence] [now|Xh|jour Xh] [label]</b>\n"
+            if "BEC" in action else
+            "🌡️ <b>/rads [maison|absence] [now|Xh|jour Xh] [label]</b>\n"
+        )
         await update.message.reply_text(help_txt, parse_mode="HTML")
         return
 
     target_dt, label, err = parse_datetime_arg(args)
     if err:
-        await update.message.reply_text(
-            f"❌ {err}\n\n" + (HELP_BEC if action == "BEC_HOME" else HELP_RADS),
-            parse_mode="HTML"
-        )
+        await update.message.reply_text(f"❌ {err}")
         return
 
     delay = (target_dt - datetime.now()).total_seconds()
-
     if delay <= 0:
-        # Exécution immédiate
         await update.message.reply_text(f"{icon} En cours...")
-        asyncio.create_task(_execute_action(action, chat_id, context, label or "maintenant"))
+        asyncio.create_task(
+            _execute_action(action, chat_id, context, label or "maintenant"))
         return
 
-    # Sauvegarder en DB
     sched_id = save_scheduled(target_dt, action, label, chat_id)
-    h_disp = target_dt.strftime("%d/%m à %Hh%M")
+    h_disp   = target_dt.strftime("%d/%m à %Hh%M")
     lbl_disp = f" — <i>{label}</i>" if label else ""
-    hrs = int(delay // 3600); mins = int((delay % 3600) // 60)
+    hrs, mins = int(delay // 3600), int((delay % 3600) // 60)
     msg = (f"{icon} Programmé le <b>{h_disp}</b>{lbl_disp}\n"
            f"<i>dans {hrs}h{mins:02d}min</i>")
     if sched_id:
         msg += f"\n/annuler{sched_id}"
-    await update.message.reply_text(msg, parse_mode="HTML", reply_markup=get_keyboard())
+    await update.message.reply_text(msg, parse_mode="HTML",
+                                    reply_markup=get_keyboard())
 
     async def delayed():
         await asyncio.sleep(delay)
@@ -316,8 +265,7 @@ async def _schedule_action(update: Update, context: ContextTypes.DEFAULT_TYPE,
     asyncio.create_task(delayed())
 
 
-async def _execute_action(action: str, chat_id: int, context, label: str):
-    """Exécute une action programmée."""
+async def _execute_action(action, chat_id, context, label):
     titles = {
         "BEC_HOME":     "🏡💧 BALLON MAISON",
         "BEC_ABSENCE":  "✈️💧 BALLON ABSENCE",
@@ -325,54 +273,42 @@ async def _execute_action(action: str, chat_id: int, context, label: str):
         "RADS_ABSENCE": "❄️🌡️ RADIATEURS ABSENCE",
     }
     try:
-        if action == "BEC_HOME":
-            res = await manage_bec("HOME")
-        elif action == "BEC_ABSENCE":
-            res = await manage_bec("ABSENCE")
-        elif action == "RADS_HOME":
-            res = await apply_heating_mode("HOME")
-        elif action == "RADS_ABSENCE":
-            res = await apply_heating_mode("ABSENCE")
-        else:
-            res = f"Action inconnue : {action}"
-        title = titles.get(action, action)
+        if   action == "BEC_HOME":     res = await manage_bec("HOME")
+        elif action == "BEC_ABSENCE":  res = await manage_bec("ABSENCE")
+        elif action == "RADS_HOME":    res = await apply_heating_mode("HOME")
+        elif action == "RADS_ABSENCE": res = await apply_heating_mode("ABSENCE")
+        else:                          res = f"Action inconnue : {action}"
         await context.bot.send_message(
-            chat_id, f"<b>{title}</b> ({label})\n\n{res}",
-            parse_mode="HTML", reply_markup=get_keyboard()
-        )
+            chat_id,
+            f"<b>{titles.get(action, action)}</b> ({label})\n\n{res}",
+            parse_mode="HTML", reply_markup=get_keyboard())
     except Exception as e:
         log(f"execute_action {action} ERR: {e}")
-        await context.bot.send_message(
-            chat_id, f"⚠️ {action} ({label}) : {e}", reply_markup=get_keyboard()
-        )
+        await context.bot.send_message(chat_id, f"⚠️ {e}",
+                                       reply_markup=get_keyboard())
 
 
 async def cmd_bec(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Usage: /bec [maison|absence] [date] [heure] [label]
-    Sans 2e argument : maison par défaut."""
     args = context.args or []
     if args and args[0].lower() in ("absence", "absent"):
-        context.args = args[1:]
-        await _schedule_action(update, context, "BEC_ABSENCE")
+        context.args = args[1:]; await _schedule_action(update, context, "BEC_ABSENCE")
     else:
+        if args and args[0].lower() == "maison": context.args = args[1:]
         await _schedule_action(update, context, "BEC_HOME")
 
 
 async def cmd_rads(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Usage: /rads [maison|absence] [date] [heure] [label]
-    Sans 2e argument : maison par défaut."""
     args = context.args or []
     if args and args[0].lower() in ("absence", "absent"):
-        context.args = args[1:]
-        await _schedule_action(update, context, "RADS_ABSENCE")
+        context.args = args[1:]; await _schedule_action(update, context, "RADS_ABSENCE")
     else:
+        if args and args[0].lower() == "maison": context.args = args[1:]
         await _schedule_action(update, context, "RADS_HOME")
 
 
 async def cmd_prog(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Affiche toutes les programmations actives."""
     chat_id = update.effective_chat.id
-    items = get_pending(chat_id)
+    items   = get_pending(chat_id)
     if not items:
         await update.message.reply_text("✅ Aucune programmation en attente.")
         return
@@ -380,23 +316,20 @@ async def cmd_prog(update: Update, context: ContextTypes.DEFAULT_TYPE):
              "RADS_HOME": "🌡️🏡", "RADS_ABSENCE": "🌡️❄️"}
     lines = ["⏰ <b>PROGRAMMATIONS EN ATTENTE</b>\n"]
     for it in items:
-        dt   = it["target_dt"].strftime("%d/%m à %Hh%M")
-        ico  = icons.get(it["action"], "⏰")
-        lbl  = f" — <i>{it['label']}</i>" if it["label"] else ""
+        dt    = it["target_dt"].strftime("%d/%m à %Hh%M")
+        lbl   = f" — <i>{it['label']}</i>" if it["label"] else ""
         delay = (it["target_dt"] - datetime.now()).total_seconds()
-        hrs = int(delay // 3600); mins = int((delay % 3600) // 60)
-        lines.append(f"{ico} <b>{dt}</b>{lbl}\n"
-                     f"   <i>dans {hrs}h{mins:02d}min</i>  /annuler{it['id']}")
+        hrs, mins = int(delay // 3600), int((delay % 3600) // 60)
+        lines.append(
+            f"{icons.get(it['action'], '⏰')} <b>{dt}</b>{lbl}\n"
+            f"   <i>dans {hrs}h{mins:02d}min</i>  /annuler{it['id']}")
     await update.message.reply_text(
-        "\n\n".join(lines), parse_mode="HTML", reply_markup=get_keyboard()
-    )
+        "\n\n".join(lines), parse_mode="HTML", reply_markup=get_keyboard())
 
 
 async def cmd_annuler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handler générique pour /annulerN (ex: /annuler42)."""
     chat_id = update.effective_chat.id
-    text = update.message.text or ""
-    m = re.search(r"/annuler(\d+)", text)
+    m = re.search(r"/annuler(\d+)", update.message.text or "")
     if not m:
         await update.message.reply_text("Usage : /annulerN (ex: /annuler42)")
         return
@@ -404,20 +337,20 @@ async def cmd_annuler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if cancel_scheduled(sched_id, chat_id):
         await update.message.reply_text(f"✅ Programmation #{sched_id} annulée.")
     else:
-        await update.message.reply_text(f"❌ #{sched_id} introuvable ou déjà exécutée.")
+        await update.message.reply_text(
+            f"❌ #{sched_id} introuvable ou déjà exécutée.")
 
 
 # ---------------------------------------------------------------------------
 # BOUTONS
 # ---------------------------------------------------------------------------
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
+    query   = update.callback_query
     chat_id = query.message.chat_id
     try:
         await query.answer()
     except Exception:
         pass
-
     action = query.data
 
     if action in ("HOME", "ABSENCE"):
@@ -428,11 +361,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             report = await apply_heating_mode(action)
             await context.bot.send_message(
-                chat_id, f"<b>RÉSULTAT {action}</b>\n\n{report}",
-                parse_mode="HTML", reply_markup=get_keyboard()
-            )
+                chat_id, f"<b>RADIATEURS {action}</b>\n\n{report}",
+                parse_mode="HTML", reply_markup=get_keyboard())
         except Exception as e:
-            await context.bot.send_message(chat_id, f"⚠️ {e}", reply_markup=get_keyboard())
+            await context.bot.send_message(chat_id, f"⚠️ {e}",
+                                           reply_markup=get_keyboard())
         return
 
     if action == "LIST":
@@ -444,20 +377,21 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             data, shelly_t = await get_current_data()
             lines = []
             for n, v in data.items():
-                lines.append(f"📍 <b>{n}</b>: {v['temp']}°C (Cible: {v['target']}°C)")
+                lines.append(f"📍 <b>{n}</b>: {v['temp']}°C"
+                             f" (Cible: {v['target']}°C)")
                 if n == "Salon" and shelly_t:
-                    lines.append(f"   └ 🌡️ <i>Shelly cuisine : {shelly_t}°C</i>")
+                    lines.append(
+                        f"   └ 🌡️ <i>Shelly cuisine : {shelly_t}°C</i>")
             lines.append(f"\n{get_hc_label()}")
-            # Programmations rads en cours
             prog = get_pending_summary(chat_id)
             if prog:
                 lines.append(f"\n⏰ <b>Programmations</b>\n{prog}")
             await context.bot.send_message(
                 chat_id, "🌡️ <b>ÉTAT ACTUEL</b>\n\n" + "\n".join(lines),
-                parse_mode="HTML", reply_markup=get_keyboard()
-            )
+                parse_mode="HTML", reply_markup=get_keyboard())
         except Exception as e:
-            await context.bot.send_message(chat_id, f"⚠️ {e}", reply_markup=get_keyboard())
+            await context.bot.send_message(chat_id, f"⚠️ {e}",
+                                           reply_markup=get_keyboard())
         return
 
     if action == "SALON_STATS":
@@ -465,10 +399,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("📊 Analyse salon...")
         except Exception:
             pass
-        result = get_salon_stats()
         await context.bot.send_message(
-            chat_id, result, parse_mode="HTML", reply_markup=get_keyboard()
-        )
+            chat_id, get_salon_stats(), parse_mode="HTML",
+            reply_markup=get_keyboard())
         return
 
     if action.startswith("BEC_"):
@@ -479,57 +412,53 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(
                 chat_id,
                 "🗑️ Table relevés vidée ✅" if ok else "❌ Erreur reset",
-                reply_markup=get_keyboard()
-            )
+                reply_markup=get_keyboard())
             return
 
         labels = {
             "GET":     "💧 Lecture ballon...",
             "STATS":   "📈 Chargement relevés...",
-            "HOME":    "🏡 Retour maison ballon...\n<i>(~1-2 min)</i>",
-            "ABSENCE": "✈️ Mode absence ballon...\n<i>(~1-2 min)</i>",
+            "HOME":    "🏡 Retour maison ballon... <i>(~1-2 min)</i>",
+            "ABSENCE": "✈️ Mode absence ballon... <i>(~1-2 min)</i>",
         }
         try:
             await context.bot.send_message(
                 chat_id, labels.get(bec_action, f"⏳ {bec_action}..."),
-                parse_mode="HTML"
-            )
+                parse_mode="HTML")
         except Exception:
             pass
 
         async def run_bec():
             try:
                 res = await manage_bec(bec_action)
-                # Ajouter les programmations BEC dans l'état
                 if bec_action == "GET":
                     prog = get_pending_summary(chat_id)
                     if prog:
                         res += f"\n\n⏰ <b>Programmations BEC</b>\n{prog}"
-                chunks = [res[i:i+4000] for i in range(0, min(len(res), 8000), 4000)]
+                chunks = [res[i:i+4000]
+                          for i in range(0, min(len(res), 8000), 4000)]
                 for i, chunk in enumerate(chunks):
-                    kb = get_keyboard() if i == len(chunks)-1 else None
+                    kb = get_keyboard() if i == len(chunks) - 1 else None
                     await context.bot.send_message(
                         chat_id, f"<b>BALLON</b>\n\n{chunk}",
-                        parse_mode="HTML", reply_markup=kb
-                    )
+                        parse_mode="HTML", reply_markup=kb)
             except Exception as e:
                 log(f"BEC {bec_action} ERR: {e}")
                 await context.bot.send_message(
-                    chat_id, f"⚠️ {e}", reply_markup=get_keyboard()
-                )
+                    chat_id, f"⚠️ {e}", reply_markup=get_keyboard())
 
         asyncio.create_task(run_bec())
 
 
 # ---------------------------------------------------------------------------
-# SURVEILLANCE BALLON : auto 70% après 4 jours à 60%
+# SURVEILLANCE BALLON
 # ---------------------------------------------------------------------------
 async def background_bec_surveillance(app):
     await asyncio.sleep(3600)
     while True:
         try:
             jours = get_absence_days()
-            log(f"Surveillance BEC : {jours} jour(s) à 60%")
+            log(f"Surveillance BEC : {jours} jour(s) en absence")
             if jours is not None and jours >= 4:
                 token = await bec_authenticate()
                 if token:
@@ -537,26 +466,27 @@ async def background_bec_surveillance(app):
                          "Content-Type": "application/json"}
                     async with httpx.AsyncClient(timeout=30) as c:
                         r = await c.get(
-                            f"{ATLANTIC_API}/magellan/cozytouch/setupviewv2", headers=h)
-                        dev = find_water_heater(r.json()[0].get("devices", []))
+                            f"{ATLANTIC_API}/magellan/cozytouch/setupviewv2",
+                            headers=h)
+                        dev = find_water_heater(
+                            r.json()[0].get("devices", []))
                         if dev:
                             dev_id = dev.get("deviceId")
-                            T = pct_to_temp(70)
-                            slot = json.dumps([[0, T], [0, 0], [0, 0], [0, 0]])
+                            T    = pct_to_temp(70)
+                            slot = json.dumps(
+                                [[0, T], [0, 0], [0, 0], [0, 0]])
                             await asyncio.gather(
                                 *[write_capability(c, h, dev_id, cap_id, slot)
-                                  for cap_id in CAPS_QTITE]
-                            )
-                            # Enregistrer l'escalade auto en base
+                                  for cap_id in CAPS_QTITE])
                             save_mode_change("ABSENCE_AUTO_70")
                             if ADMIN_CHAT_ID:
                                 await app.bot.send_message(
                                     ADMIN_CHAT_ID,
-                                    f"⚠️ <b>Ballon</b> : 60% depuis {jours} jours\n"
-                                    f"✅ Passé automatiquement à <b>70%</b> (53°C)\n"
+                                    f"⚠️ <b>Ballon</b> : absence depuis "
+                                    f"{jours} jours\n"
+                                    f"✅ Passé à <b>70%</b> (53°C)\n"
                                     f"<i>Sécurité anti-légionelle</i>",
-                                    parse_mode="HTML"
-                                )
+                                    parse_mode="HTML")
         except Exception as e:
             log(f"Surveillance BEC ERR: {e}")
         await asyncio.sleep(24 * 3600)
@@ -585,25 +515,26 @@ async def background_rad_logger():
 
 
 # ---------------------------------------------------------------------------
-# HEALTH + MAIN
+# ERROR HANDLER
 # ---------------------------------------------------------------------------
-class Health(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200); self.end_headers(); self.wfile.write(b"OK")
-    def log_message(self, *a): pass
-
-
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    """Gestionnaire global d'erreurs — log uniquement, pas d'action."""
     err = context.error
     if isinstance(err, Conflict):
-        # Normal pendant ~15s lors d'un redéploiement Koyeb.
-        # python-telegram-bot retente automatiquement jusqu'à résolution.
-        return  # silencieux
+        return  # normal ~15s au déploiement
     if isinstance(err, NetworkError):
         log(f"NetworkError (transitoire) : {err}")
         return
     log(f"Erreur : {type(err).__name__}: {err}")
+
+
+# ---------------------------------------------------------------------------
+# HEALTH CHECK + MAIN
+# ---------------------------------------------------------------------------
+class Health(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200); self.end_headers(); self.wfile.write(b"OK")
+    def log_message(self, *a):
+        pass
 
 
 def main():
@@ -614,13 +545,12 @@ def main():
         daemon=True
     ).start()
     app = Application.builder().token(TOKEN).build()
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("bec",   cmd_bec))
-    app.add_handler(CommandHandler("rads",  cmd_rads))
-    app.add_handler(CommandHandler("prog",  cmd_prog))
+    app.add_handler(CommandHandler("start",  cmd_start))
+    app.add_handler(CommandHandler("bec",    cmd_bec))
+    app.add_handler(CommandHandler("rads",   cmd_rads))
+    app.add_handler(CommandHandler("prog",   cmd_prog))
     app.add_handler(MessageHandler(
-        filters.Regex(r"^/annuler\d+"), cmd_annuler
-    ))
+        filters.Regex(r"^/annuler\d+"), cmd_annuler))
     app.add_error_handler(error_handler)
 
     async def post_init(application):
@@ -631,10 +561,8 @@ def main():
 
     app.post_init = post_init
     log(f"DÉMARRAGE v{VERSION}")
-    app.run_polling(
-        drop_pending_updates=True,
-        allowed_updates=Update.ALL_TYPES,
-    )
+    app.run_polling(drop_pending_updates=True,
+                    allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":
