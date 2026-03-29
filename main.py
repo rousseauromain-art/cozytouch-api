@@ -15,7 +15,7 @@ from bec import (manage_bec, bec_get_index, is_heure_creuse,
                  pct_to_temp, write_capability, bec_authenticate,
                  find_water_heater, CAPS_QTITE)
 from heating import (get_current_data, apply_heating_mode, perform_record,
-                     init_db, get_salon_stats)
+                     init_db, get_salon_stats, get_rad_detail)
 
 
 # ---------------------------------------------------------------------------
@@ -141,6 +141,7 @@ def get_keyboard():
          InlineKeyboardButton("❄️ ABSENCE",        callback_data="ABSENCE")],
         [InlineKeyboardButton("🔍 ÉTAT RADS",      callback_data="LIST"),
          InlineKeyboardButton("📊 STATS SALON",    callback_data="SALON_STATS")],
+        [InlineKeyboardButton("🔬 DIAG SALON",     callback_data="DIAG_SALON")],
         [InlineKeyboardButton("💧 BALLON ÉTAT",    callback_data="BEC_GET"),
          InlineKeyboardButton("📈 CONSO HC/HP",    callback_data="BEC_STATS")],
         [InlineKeyboardButton("🏡 BALLON MAISON",  callback_data="BEC_HOME"),
@@ -400,6 +401,17 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         await context.bot.send_message(
             chat_id, get_salon_stats(), parse_mode="HTML",
+            reply_markup=get_keyboard())
+        return
+
+    if action == "DIAG_SALON":
+        try:
+            await query.edit_message_text("🔬 Diagnostic salon...")
+        except Exception:
+            pass
+        result = await get_rad_detail("Salon")
+        await context.bot.send_message(
+            chat_id, result, parse_mode="HTML",
             reply_markup=get_keyboard())
         return
 

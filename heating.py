@@ -268,3 +268,93 @@ async def perform_record(heure_creuse: bool = False):
         conn.commit(); cur.close(); conn.close()
     except Exception as e:
         log(f"RECORD ERR: {e}")
+
+async def get_rad_detail(room_name: str = "Salon") -> str:
+    """Lit tous les états détaillés d'un radiateur pour diagnostic."""
+    # États à lire
+    STATES_WANTED = [
+        "core:TemperatureState",
+        "core:TargetTemperatureState",
+        "io:EffectiveTemperatureSetpointState",
+        "core:OnOffState",
+        "io:CurrentHeatingLevelState",
+        "core:HeatingStatusState",
+        "io:PassAPCOperatingModeState",
+        "core:OperatingModeState",
+        "io:TargetHeatingLevelState",
+        "core:ComfortRoomTemperatureState",
+        "core:EcoRoomTemperatureState",
+        "io:DerogationRemainingTimeState",
+        "core:DerogationActivationState",
+        "core:PowerConsumptionState",
+        "core:ElectricEnergyConsumptionState",
+        "core:TemperatureOffsetState",
+        "io:PilotWireInterfacedHeaterState",
+    ]
+    LABELS = {
+        "core:TemperatureState":               "🌡️ Temp mesurée",
+        "core:TargetTemperatureState":         "🎯 Consigne brute",
+        "io:EffectiveTemperatureSetpointState": "🎯 Consigne effective",
+        "core:OnOffState":                     "⚡ Résistance",
+        "io:CurrentHeatingLevelState":         "📊 Puissance actuelle %",
+        "core:HeatingStatusState":             "🔥 Statut chauffe",
+        "io:PassAPCOperatingModeState":        "⚙️ Mode APC",
+        "core:OperatingModeState":             "⚙️ Mode opérationnel",
+        "io:TargetHeatingLevelState":          "📊 Puissance cible %",
+        "core:ComfortRoomTemperatureState":    "🏠 Confort programmé",
+        "core:EcoRoomTemperatureState":        "🌿 Éco programmé",
+        "io:DerogationRemainingTimeState":     "⏱️ Dérogation restante",
+        "core:DerogationActivationState":      "🔄 Dérogation active",
+        "core:PowerConsumptionState":          "⚡ Puissance (W)",
+        "core:ElectricEnergyConsumptionState": "📈 Conso cumul (Wh)",
+        "core:TemperatureOffsetState":         "↕️ Offset température",
+        "io:PilotWireInterfacedHeaterState":   "🔌 Fil pilote",
+    }
+    try:
+        async with OverkizClient(OVERKIZ_EMAIL, OVERKIZ_PASSWORD,
+                                 server=MY_SERVER) as c:
+            await c.login()
+            devices = await c.get_devices()
+            lines = [f"🔍 <b>DIAGNOSTIC {room_name.upper()}</b>", ""]
+            found = False
+            for d in devices:
+                fid = d.device_url.split("#")[0].split("/")[-1] + "#1"
+                if fid not in CONFORT_VALS:
+                    continue
+                if CONFORT_VALS[fid]["name"] != room_name:
+                    continue
+                found = True
+                states = {s.name: s.value for s in d.states}
+                # Afficher les états trouvés
+                for key in STATES_WANTED:
+                    val = states.get(key)
+                    if val is None:
+                        continue
+                    label = LABELS.get(key, key.split(":")[-1])
+                    # Formater la valeur
+                    if isinstance(val, float):
+                        val_str = f"<b>{val:.1f}</b>"
+                        if "Temperature" in key or "Offset" in key:
+                            val_str += "°C"
+                        elif "Level" in key:
+                            val_str += "%"
+                        elif "Power" in key or "Energy" in key:
+                            val_str += "W" if "Power" in key else "Wh"
+                    elif isinstance(val, bool):
+                        val_str = "✅ OUI" if val else "❌ NON"
+                    else:
+                        val_str = f"<b>{val}</b>"
+                    lines.append(f"  {label} : {val_str}")
+                # États non trouvés (pas exposés par ce device)
+                missing = [LABELS.get(k, k) for k in STATES_WANTED
+                           if k not in states]
+                if missing:
+                    lines.append("")
+                    lines.append(f"<i>Non exposés : {', '.join(missing[:5])}</i>")
+                break
+            if not found:
+                lines.append(f"❌ {room_name} non trouvé")
+            return "\n".join(lines)
+    except Exception as e:
+        log(f"get_rad_detail ERR: {e}")
+        return f"⚠️ {e}"
