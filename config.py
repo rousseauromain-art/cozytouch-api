@@ -28,7 +28,7 @@ HC_TRANSITIONS = [
 
 # Radiateurs
 CONFORT_VALS = {
-    "14253355#1": {"name": "Salon",          "temp": 19.5, "eco": 16.0},
+    "14253355#1": {"name": "Salon",          "temp": 18.5, "eco": 15.0},
     "190387#1":   {"name": "Chambre",         "temp": 19.0, "eco": 16.0},
     "1640746#1":  {"name": "Bureau",          "temp": 18.0, "eco": 15.0},
     "4326513#1":  {"name": "Sèche-Serviette", "temp": 19.5, "eco": 16.0},
